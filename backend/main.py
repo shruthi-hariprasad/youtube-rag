@@ -5,6 +5,9 @@ import requests
 from youtube_transcript_api import YouTubeTranscriptApi
 from .database import get_db, engine
 from . import models
+from .chunker import chunk_text
+from .embedder import get_embeddings
+from .vector_store import add_chunks
 
 
 def extract_video_id(url: str) -> str | None:
@@ -105,6 +108,12 @@ def add_video(url: str, db: Session = Depends(get_db)):
         db.add(video)
         db.commit()
         db.refresh(video)
+
+        # Chunk, embed, and store vectors in the vector store
+        chunks = chunk_text(video.transcript_text)
+        embeddings = get_embeddings(chunks)
+        add_chunks(video.youtube_video_id, chunks, embeddings)
+
     except Exception as e:
         # Rollback and surface a friendly error
         db.rollback()
