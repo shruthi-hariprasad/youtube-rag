@@ -8,6 +8,8 @@ from . import models
 from .chunker import chunk_text
 from .embedder import get_embeddings
 from .vector_store import add_chunks
+from .retriever import retrieve_chunks
+from .generator import generate_answer
 
 
 def extract_video_id(url: str) -> str | None:
@@ -128,5 +130,25 @@ async def list_videos():
 
 
 @app.post("/query")
-async def query():
-    return {"message": "query endpoint coming soon"}
+def query(question: str, db: Session = Depends(get_db)):
+    # Step 1: retrieve relevant chunks from ChromaDB
+    chunks = retrieve_chunks(question)
+
+    if not chunks:
+        raise HTTPException(status_code=404, detail="No relevant content found")
+
+    # Step 2: look up video titles from PostgreSQL using the video_ids
+    unique_video_ids = list(set([c["video_id"] for c in chunks]))
+    videos = db.query(models.Video).filter(
+        models.Video.youtube_video_id.in_(unique_video_ids)
+    ).all()
+    title_map = {v.youtube_video_id: v.title for v in videos}
+
+    # Step 3: enrich chunks with titles for the generator
+    for chunk in chunks:
+        chunk["title"] = title_map.get(chunk["video_id"], chunk["video_id"])
+
+    # Step 4: generate answer
+    result = generate_answer(question, chunks)
+
+    return result
