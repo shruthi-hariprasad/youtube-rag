@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, Header
 from sqlalchemy.orm import Session
 from urllib.parse import urlparse, parse_qs
 import requests
@@ -10,7 +10,21 @@ from .embedder import get_embeddings
 from .vector_store import add_chunks
 from .retriever import retrieve_chunks
 from .generator import generate_answer
+from pydantic import BaseModel
+from .auth import hash_password, verify_password, create_token, decode_token
 
+class UserCreate(BaseModel):
+    email: str
+    password: str
+
+def get_current_user(authorization: str = Header(...)) -> int:
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Invalid auth header")
+    token = authorization.split(" ")[1]
+    user_id = decode_token(token)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    return user_id
 
 def extract_video_id(url: str) -> str | None:
     """Extract a YouTube video ID from common URL formats.
@@ -59,9 +73,30 @@ app = FastAPI()
 # Create database tables
 models.Base.metadata.create_all(bind=engine)
 
+@app.post("/auth/register")
+def register(user: UserCreate, db: Session = Depends(get_db)):
+    existing = db.query(models.User).filter(models.User.email == user.email).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="Email already registered")
+    new_user = models.User(
+        email=user.email,
+        hashed_password=hash_password(user.password)
+    )
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+    return {"message": "User created successfully"}
+
+@app.post("/auth/login")
+def login(user: UserCreate, db: Session = Depends(get_db)):
+    db_user = db.query(models.User).filter(models.User.email == user.email).first()
+    if not db_user or not verify_password(user.password, db_user.hashed_password):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    token = create_token(db_user.id)
+    return {"access_token": token, "token_type": "bearer"}
 
 @app.post("/videos")
-def add_video(url: str, db: Session = Depends(get_db)):
+def add_video(url: str, db: Session = Depends(get_db), user_id: int = Depends(get_current_user)):
     """Add a YouTube video by URL: fetch metadata, transcript, and save to DB.
 
     Returns the saved Video model instance.
@@ -98,6 +133,7 @@ def add_video(url: str, db: Session = Depends(get_db)):
 
     # Persist to DB
     video = models.Video(
+        user_id=user_id,
         youtube_video_id=video_id,
         title=metadata.get("title"),
         channel_name=metadata.get("author_name"),
@@ -125,12 +161,13 @@ def add_video(url: str, db: Session = Depends(get_db)):
 
 
 @app.get("/videos")
-async def list_videos():
-    return {"message": "list endpoint coming soon"}
+def get_videos(db: Session = Depends(get_db), user_id: int = Depends(get_current_user)):
+    videos = db.query(models.Video).filter(models.Video.user_id == user_id).all()
+    return videos
 
 
 @app.post("/query")
-def query(question: str, db: Session = Depends(get_db)):
+def query(question: str, db: Session = Depends(get_db), user_id: int = Depends(get_current_user)):
     # Step 1: retrieve relevant chunks from ChromaDB
     chunks = retrieve_chunks(question)
 
