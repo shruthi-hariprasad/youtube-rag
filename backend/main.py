@@ -12,16 +12,18 @@ from .retriever import retrieve_chunks
 from .generator import generate_answer
 from pydantic import BaseModel
 from .auth import hash_password, verify_password, create_token, decode_token
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 class UserCreate(BaseModel):
     email: str
     password: str
 
-def get_current_user(authorization: str = Header(...)) -> int:
-    if not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Invalid auth header")
-    token = authorization.split(" ")[1]
-    user_id = decode_token(token)
+security_scheme = HTTPBearer()
+
+def get_current_user(
+    credentials: HTTPAuthorizationCredentials = Depends(security_scheme)
+) -> int:
+    user_id = decode_token(credentials.credentials)
     if not user_id:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
     return user_id
@@ -101,14 +103,20 @@ def add_video(url: str, db: Session = Depends(get_db), user_id: int = Depends(ge
 
     Returns the saved Video model instance.
     """
+    existing = db.query(models.Video).filter(models.Video.youtube_video_id == video_id,models.Video.user_id == user_id).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="You have already added this video")
+
     try:
         video_id = extract_video_id(url)
         if not video_id:
             # match requested behavior: treat extraction failure as a 400
             raise ValueError("Could not extract video id from URL")
-
+    
+    
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
 
     # Fetch oEmbed metadata
     oembed_url = f"https://www.youtube.com/oembed?url={url}&format=json"
