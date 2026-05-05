@@ -1,4 +1,6 @@
 from fastapi import FastAPI, Depends, HTTPException, Header
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from urllib.parse import urlparse, parse_qs
 import requests
@@ -12,7 +14,6 @@ from .retriever import retrieve_chunks
 from .generator import generate_answer
 from pydantic import BaseModel
 from .auth import hash_password, verify_password, create_token, decode_token
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 class UserCreate(BaseModel):
     email: str
@@ -71,6 +72,13 @@ def extract_video_id(url: str) -> str | None:
 
 app = FastAPI()
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Create database tables
 models.Base.metadata.create_all(bind=engine)
@@ -99,11 +107,16 @@ def login(user: UserCreate, db: Session = Depends(get_db)):
 
 @app.post("/videos")
 def add_video(url: str, db: Session = Depends(get_db), user_id: int = Depends(get_current_user)):
-    """Add a YouTube video by URL: fetch metadata, transcript, and save to DB.
+    # Extract video ID first
+    video_id = extract_video_id(url)
+    if not video_id:
+        raise HTTPException(status_code=400, detail="Could not extract video id from URL")
 
-    Returns the saved Video model instance.
-    """
-    existing = db.query(models.Video).filter(models.Video.youtube_video_id == video_id,models.Video.user_id == user_id).first()
+    # Then check for duplicates
+    existing = db.query(models.Video).filter(
+        models.Video.youtube_video_id == video_id,
+        models.Video.user_id == user_id
+    ).first()
     if existing:
         raise HTTPException(status_code=400, detail="You have already added this video")
 
@@ -175,9 +188,19 @@ def get_videos(db: Session = Depends(get_db), user_id: int = Depends(get_current
 
 
 @app.post("/query")
-def query(question: str, db: Session = Depends(get_db), user_id: int = Depends(get_current_user)):
+def query(question: str, video_id: str = None, db: Session = Depends(get_db), user_id: int = Depends(get_current_user)):
+    # Get all video IDs belonging to this user
+    user_videos = db.query(models.Video).filter(models.Video.user_id == user_id).all()
+    user_video_ids = [v.youtube_video_id for v in user_videos]
+
+    # Filter to specific video or all user's videos
+    filter_ids = [video_id] if video_id else user_video_ids
+
+    if not filter_ids:
+        raise HTTPException(status_code=404, detail="No videos in your library yet")
+
     # Step 1: retrieve relevant chunks from ChromaDB
-    chunks = retrieve_chunks(question)
+    chunks = retrieve_chunks(question, video_ids=filter_ids)
 
     if not chunks:
         raise HTTPException(status_code=404, detail="No relevant content found")

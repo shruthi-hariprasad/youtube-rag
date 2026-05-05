@@ -26,9 +26,7 @@ Answer based only on the transcript content above. If the answer is not in the t
         messages=[{"role": "user", "content": prompt}]
     )
 
-    sources = list(set([chunk["title"] for chunk in chunks]))
-
     return {
-        "answer": response.choices[0].message.content,
-        "sources": sources
-    }
+    "answer": response.choices[0].message.content,
+    "sources": chunks
+}
