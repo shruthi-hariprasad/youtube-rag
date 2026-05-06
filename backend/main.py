@@ -14,6 +14,7 @@ from .retriever import retrieve_chunks
 from .generator import generate_answer
 from pydantic import BaseModel
 from .auth import hash_password, verify_password, create_token, decode_token
+import os
 
 class UserCreate(BaseModel):
     email: str
@@ -144,12 +145,23 @@ def add_video(url: str, db: Session = Depends(get_db), user_id: int = Depends(ge
 
     # Fetch transcript
     try:
-        # The youtube-transcript-api package exposes an instance API. Use
-        # YouTubeTranscriptApi().fetch(video_id) to retrieve the transcript.
-        transcript_list = YouTubeTranscriptApi().fetch(video_id)
+        proxy_username = os.getenv("WEBSHARE_PROXY_USERNAME")
+        proxy_password = os.getenv("WEBSHARE_PROXY_PASSWORD")
+
+        if proxy_username and proxy_password:
+            from youtube_transcript_api.proxies import WebshareProxyConfig
+            ytt = YouTubeTranscriptApi(
+                proxies=WebshareProxyConfig(
+                    proxy_username=proxy_username,
+                    proxy_password=proxy_password,
+                )
+            )
+        else:
+            ytt = YouTubeTranscriptApi()
+
+        transcript_list = ytt.fetch(video_id)
         transcript_text = " ".join([t.text for t in transcript_list])
     except Exception as e:
-        # Likely no captions or unavailable video
         raise HTTPException(status_code=400, detail=f"Could not fetch transcript: {e}")
 
     # Persist to DB
