@@ -179,8 +179,13 @@ def add_video(url: str, db: Session = Depends(get_db), user_id: int = Depends(ge
         db.add(video)
         db.commit()
         db.refresh(video)
+
+        # Chunk, embed, and store vectors in ChromaDB
+        chunks = chunk_text(video.transcript_text)
+        embeddings = get_embeddings(chunks)
+        add_chunks(video.youtube_video_id, chunks, embeddings)
+
     except Exception as e:
-        # Rollback and surface a friendly error
         db.rollback()
         raise HTTPException(status_code=400, detail=f"Could not save video to database: {e}")
 
