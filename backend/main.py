@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException, Header
+from fastapi import FastAPI, Depends, HTTPException
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
@@ -199,7 +199,7 @@ def get_videos(db: Session = Depends(get_db), user_id: int = Depends(get_current
 
 
 @app.post("/query")
-def query(question: str, video_id: str = None, db: Session = Depends(get_db), user_id: int = Depends(get_current_user)):
+def query(question: str, video_id: str | None = None, db: Session = Depends(get_db), user_id: int = Depends(get_current_user)):
     # Get all video IDs belonging to this user
     user_videos = db.query(models.Video).filter(models.Video.user_id == user_id).all()
     user_video_ids = [v.youtube_video_id for v in user_videos]
