@@ -23,14 +23,17 @@ def retrieve_chunks(
         include=["documents", "metadatas", "distances"]
     )
     
-    # Format into a clean list of dicts
+    DISTANCE_THRESHOLD = 0.7
+
     chunks = []
     for i in range(len(results["documents"][0])):
-        chunks.append({
-            "text": results["documents"][0][i],
-            "video_id": results["metadatas"][0][i]["video_id"],
-            "chunk_index": results["metadatas"][0][i]["chunk_index"],
-            "distance": results["distances"][0][i]
-        })
-    
+        distance = results["distances"][0][i]
+        if distance <= DISTANCE_THRESHOLD:
+            chunks.append({
+                "text": results["documents"][0][i],
+                "video_id": results["metadatas"][0][i]["video_id"],
+                "chunk_index": results["metadatas"][0][i]["chunk_index"],
+                "distance": distance,
+            })
+
     return chunks

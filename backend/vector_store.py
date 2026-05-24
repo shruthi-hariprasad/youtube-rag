@@ -21,6 +21,12 @@ def add_chunks(video_id: str, chunks: list[str], embeddings: list[list[float]]):
         metadatas=[{"video_id": video_id, "chunk_index": i} for i in range(len(chunks))]
     )
 
+def delete_chunks(video_id: str):
+    collection = get_collection()
+    results = collection.get(where={"video_id": video_id})
+    if results["ids"]:
+        collection.delete(ids=results["ids"])
+
 if __name__ == "__main__":
     col = get_collection()
     print(col.count())

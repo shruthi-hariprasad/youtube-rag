@@ -1,17 +1,20 @@
+from contextlib import asynccontextmanager
+import asyncio
 from fastapi import FastAPI, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from urllib.parse import urlparse, parse_qs
 import requests
 from youtube_transcript_api import YouTubeTranscriptApi
-from .database import get_db, engine
+from .database import get_db, engine, SessionLocal
 from . import models
 from .chunker import chunk_text
 from .embedder import get_embeddings
-from .vector_store import add_chunks
+from .vector_store import add_chunks, delete_chunks, get_collection
 from .retriever import retrieve_chunks
-from .generator import generate_answer
+from .generator import generate_answer, stream_answer
 from pydantic import BaseModel
 from .auth import hash_password, verify_password, create_token, decode_token
 import os
@@ -71,7 +74,30 @@ def extract_video_id(url: str) -> str | None:
         return None
 
 
-app = FastAPI()
+def _reembed_if_empty():
+    """Re-embed all stored transcripts when ChromaDB is empty (e.g. after a Render redeploy)."""
+    if get_collection().count() > 0:
+        return
+    db = SessionLocal()
+    try:
+        videos = db.query(models.Video).all()
+        for video in videos:
+            if not video.transcript_text:
+                continue
+            chunks = chunk_text(video.transcript_text)
+            embeddings = get_embeddings(chunks)
+            add_chunks(video.youtube_video_id, chunks, embeddings)
+    finally:
+        db.close()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await asyncio.to_thread(_reembed_if_empty)
+    yield
+
+
+app = FastAPI(lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -198,6 +224,20 @@ def get_videos(db: Session = Depends(get_db), user_id: int = Depends(get_current
     return videos
 
 
+@app.delete("/videos/{video_id}")
+def delete_video(video_id: int, db: Session = Depends(get_db), user_id: int = Depends(get_current_user)):
+    video = db.query(models.Video).filter(
+        models.Video.id == video_id,
+        models.Video.user_id == user_id
+    ).first()
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+    delete_chunks(video.youtube_video_id)
+    db.delete(video)
+    db.commit()
+    return {"message": "Video deleted successfully"}
+
+
 @app.post("/query")
 def query(question: str, video_id: str | None = None, db: Session = Depends(get_db), user_id: int = Depends(get_current_user)):
     # Get all video IDs belonging to this user
@@ -231,3 +271,33 @@ def query(question: str, video_id: str | None = None, db: Session = Depends(get_
     result = generate_answer(question, chunks)
 
     return result
+
+
+@app.get("/query/stream")
+def query_stream(question: str, video_id: str | None = None, db: Session = Depends(get_db), user_id: int = Depends(get_current_user)):
+    user_videos = db.query(models.Video).filter(models.Video.user_id == user_id).all()
+    user_video_ids = [v.youtube_video_id for v in user_videos]
+    filter_ids = [video_id] if video_id else user_video_ids
+
+    if not filter_ids:
+        raise HTTPException(status_code=404, detail="No videos in your library yet")
+
+    chunks = retrieve_chunks(question, video_ids=filter_ids)
+
+    if not chunks:
+        raise HTTPException(status_code=404, detail="No relevant content found")
+
+    unique_video_ids = list(set([c["video_id"] for c in chunks]))
+    videos = db.query(models.Video).filter(
+        models.Video.youtube_video_id.in_(unique_video_ids)
+    ).all()
+    title_map = {v.youtube_video_id: v.title for v in videos}
+
+    for chunk in chunks:
+        chunk["title"] = title_map.get(chunk["video_id"], chunk["video_id"])
+
+    return StreamingResponse(
+        stream_answer(question, chunks),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
