@@ -23,8 +23,13 @@ import os
 
 
 class UserCreate(BaseModel):
-    email: str
+    username: str
     password: str
+
+
+class PasswordChange(BaseModel):
+    current_password: str
+    new_password: str
 
 
 class QueryRequest(BaseModel):
@@ -124,11 +129,14 @@ models.Base.metadata.create_all(bind=engine)
 
 @app.post("/auth/register")
 def register(user: UserCreate, db: Session = Depends(get_db)):
-    existing = db.query(models.User).filter(models.User.email == user.email).first()
+    import re
+    if not re.match(r'^[a-zA-Z0-9_.-]{3,30}$', user.username):
+        raise HTTPException(status_code=400, detail="Username must be 3–30 characters: letters, numbers, _ . -")
+    existing = db.query(models.User).filter(models.User.email == user.username).first()
     if existing:
-        raise HTTPException(status_code=400, detail="Email already registered")
+        raise HTTPException(status_code=400, detail="Username already taken")
     new_user = models.User(
-        email=user.email,
+        email=user.username,
         hashed_password=hash_password(user.password)
     )
     db.add(new_user)
@@ -139,11 +147,32 @@ def register(user: UserCreate, db: Session = Depends(get_db)):
 
 @app.post("/auth/login")
 def login(user: UserCreate, db: Session = Depends(get_db)):
-    db_user = db.query(models.User).filter(models.User.email == user.email).first()
+    db_user = db.query(models.User).filter(models.User.email == user.username).first()
     if not db_user or not verify_password(user.password, db_user.hashed_password):
-        raise HTTPException(status_code=401, detail="Invalid credentials")
+        raise HTTPException(status_code=401, detail="Invalid username or password")
     token = create_token(db_user.id)
     return {"access_token": token, "token_type": "bearer"}
+
+
+@app.put("/auth/password")
+def change_password(body: PasswordChange, db: Session = Depends(get_db), user_id: int = Depends(get_current_user)):
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not verify_password(body.current_password, user.hashed_password):
+        raise HTTPException(status_code=400, detail="Current password is incorrect")
+    user.hashed_password = hash_password(body.new_password)
+    db.commit()
+    return {"message": "Password updated"}
+
+
+@app.delete("/auth/account")
+def delete_account(db: Session = Depends(get_db), user_id: int = Depends(get_current_user)):
+    videos = db.query(models.Video).filter(models.Video.user_id == user_id).all()
+    for video in videos:
+        delete_chunks(video.youtube_video_id)
+    db.query(models.Video).filter(models.Video.user_id == user_id).delete()
+    db.query(models.User).filter(models.User.id == user_id).delete()
+    db.commit()
+    return {"message": "Account deleted"}
 
 
 @app.post("/videos")
