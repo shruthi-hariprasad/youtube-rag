@@ -31,6 +31,17 @@ export default function Library() {
       .finally(() => setFetching(false))
   }, [])
 
+  async function handleDelete(e: React.MouseEvent, videoId: number) {
+    e.stopPropagation()
+    if (!window.confirm("Remove this video from your library?")) return
+    try {
+      await api.delete(`/videos/${videoId}`)
+      setVideos(prev => prev.filter(v => v.id !== videoId))
+    } catch {
+      setError("Failed to delete video")
+    }
+  }
+
   async function handleAddVideo(e: React.FormEvent) {
     e.preventDefault()
     setError("")
@@ -101,9 +112,18 @@ export default function Library() {
                   alt={video.title}
                   className="w-full aspect-video object-cover"
                 />
-                <div className="p-3">
-                  <p className="text-sm font-medium text-gray-900 line-clamp-2">{video.title}</p>
-                  <p className="text-xs text-gray-500 mt-1">{video.channel_name}</p>
+                <div className="p-3 flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium text-gray-900 line-clamp-2">{video.title}</p>
+                    <p className="text-xs text-gray-500 mt-1">{video.channel_name}</p>
+                  </div>
+                  <button
+                    onClick={(e) => handleDelete(e, video.id)}
+                    className="shrink-0 text-gray-300 hover:text-red-500 transition text-xl leading-none pt-0.5"
+                    title="Remove video"
+                  >
+                    &times;
+                  </button>
                 </div>
               </div>
             ))}

@@ -1,43 +1,43 @@
-"""Simple chunking utility for splitting transcript text into overlapping chunks.
-
-The public function `chunk_text` follows the project convention:
-- chunk size: 300 words
-- overlap: 50 words
-
-It splits on whitespace using `str.split()` and returns a list of chunk strings.
-"""
+import re
 from typing import List
 
 
+def _split_sentences(text: str) -> List[str]:
+    sentences = re.split(r'(?<=[.!?])\s+', text.strip())
+    return [s for s in sentences if s.strip()]
+
+
 def chunk_text(text: str) -> List[str]:
-    """Split `text` into overlapping chunks of words.
-
-    Args:
-        text: Input string (transcript or document).
-
-    Returns:
-        A list of strings where each string is a chunk of up to `chunk_size`
-        words. Chunks overlap by `overlap` words.
-    """
     if not text:
         return []
 
-    words = text.split()
+    sentences = _split_sentences(text)
     chunk_size = 300
-    overlap = 50
-    results: List[str] = []
+    overlap_size = 50
+    chunks: List[str] = []
+    current: List[str] = []
+    current_words = 0
 
-    # Prevent negative or zero step in pathological configs
-    step = chunk_size - overlap
-    if step <= 0:
-        step = chunk_size
+    for sentence in sentences:
+        sw = len(sentence.split())
+        if current_words + sw > chunk_size and current:
+            chunks.append(" ".join(current))
+            # Carry forward the tail of the current chunk as overlap
+            overlap: List[str] = []
+            ow = 0
+            for s in reversed(current):
+                w = len(s.split())
+                if ow + w <= overlap_size:
+                    overlap.insert(0, s)
+                    ow += w
+                else:
+                    break
+            current = overlap
+            current_words = ow
+        current.append(sentence)
+        current_words += sw
 
-    start = 0
-    n = len(words)
-    while start < n:
-        end = start + chunk_size
-        chunk = " ".join(words[start:end])
-        results.append(chunk)
-        start += step
+    if current:
+        chunks.append(" ".join(current))
 
-    return results
+    return chunks
