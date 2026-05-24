@@ -1,3 +1,5 @@
+from contextlib import asynccontextmanager
+import asyncio
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -6,11 +8,11 @@ from sqlalchemy.orm import Session
 from urllib.parse import urlparse, parse_qs
 import requests
 from youtube_transcript_api import YouTubeTranscriptApi
-from .database import get_db, engine
+from .database import get_db, engine, SessionLocal
 from . import models
 from .chunker import chunk_text
 from .embedder import get_embeddings
-from .vector_store import add_chunks, delete_chunks
+from .vector_store import add_chunks, delete_chunks, get_collection
 from .retriever import retrieve_chunks
 from .generator import generate_answer, stream_answer
 from pydantic import BaseModel
@@ -72,7 +74,30 @@ def extract_video_id(url: str) -> str | None:
         return None
 
 
-app = FastAPI()
+def _reembed_if_empty():
+    """Re-embed all stored transcripts when ChromaDB is empty (e.g. after a Render redeploy)."""
+    if get_collection().count() > 0:
+        return
+    db = SessionLocal()
+    try:
+        videos = db.query(models.Video).all()
+        for video in videos:
+            if not video.transcript_text:
+                continue
+            chunks = chunk_text(video.transcript_text)
+            embeddings = get_embeddings(chunks)
+            add_chunks(video.youtube_video_id, chunks, embeddings)
+    finally:
+        db.close()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await asyncio.to_thread(_reembed_if_empty)
+    yield
+
+
+app = FastAPI(lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
