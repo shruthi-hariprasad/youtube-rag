@@ -7,6 +7,8 @@ load_dotenv()
 
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
+MODEL = "llama-3.3-70b-versatile"
+
 _SYSTEM_PROMPT = """You are a helpful assistant that answers questions strictly based on YouTube video transcript excerpts provided to you.
 
 Rules:
@@ -14,24 +16,29 @@ Rules:
 - When referencing information, cite which video it came from using the [Source: ...] labels
 - If the answer is not in the transcripts, say exactly: "I couldn't find that information in these transcripts."
 - Never speculate, hallucinate, or draw on knowledge outside the provided excerpts
-- Be specific, accurate, and concise"""
+- Be specific, accurate, and concise
+- Use markdown formatting (bullet points, bold) where it improves readability"""
 
 
-def _build_messages(query: str, chunks: list[dict]) -> list[dict]:
+def _build_messages(query: str, chunks: list[dict], history: list[dict] | None = None) -> list[dict]:
     context = "\n\n".join(
         f"[Source: {chunk['title']}]\n{chunk['text']}" for chunk in chunks
     )
-    return [
-        {"role": "system", "content": _SYSTEM_PROMPT},
-        {"role": "user", "content": f"Transcript excerpts:\n{context}\n\nQuestion: {query}"},
-    ]
+    messages = [{"role": "system", "content": _SYSTEM_PROMPT}]
+    if history:
+        messages.extend(history[-6:])
+    messages.append({
+        "role": "user",
+        "content": f"Transcript excerpts:\n{context}\n\nQuestion: {query}",
+    })
+    return messages
 
 
-def generate_answer(query: str, chunks: list[dict]) -> dict:
+def generate_answer(query: str, chunks: list[dict], history: list[dict] | None = None) -> dict:
     response = client.chat.completions.create(
-        model="llama-3.1-8b-instant",
+        model=MODEL,
         max_tokens=1024,
-        messages=_build_messages(query, chunks),
+        messages=_build_messages(query, chunks, history),
     )
     return {
         "answer": response.choices[0].message.content,
@@ -39,11 +46,11 @@ def generate_answer(query: str, chunks: list[dict]) -> dict:
     }
 
 
-def stream_answer(query: str, chunks: list[dict]):
+def stream_answer(query: str, chunks: list[dict], history: list[dict] | None = None):
     stream = client.chat.completions.create(
-        model="llama-3.1-8b-instant",
+        model=MODEL,
         max_tokens=1024,
-        messages=_build_messages(query, chunks),
+        messages=_build_messages(query, chunks, history),
         stream=True,
     )
     for piece in stream:
@@ -51,3 +58,31 @@ def stream_answer(query: str, chunks: list[dict]):
         if token:
             yield f"data: {json.dumps({'token': token})}\n\n"
     yield f"data: {json.dumps({'sources': chunks, 'done': True})}\n\n"
+
+
+def generate_summary_and_questions(transcript_text: str) -> dict:
+    excerpt = transcript_text[:6000]
+    response = client.chat.completions.create(
+        model=MODEL,
+        max_tokens=512,
+        messages=[
+            {
+                "role": "system",
+                "content": "You are a helpful assistant. Respond with valid JSON only, no other text.",
+            },
+            {
+                "role": "user",
+                "content": (
+                    "Analyze this YouTube transcript and return a JSON object with exactly two keys:\n"
+                    '- "summary": a 2-sentence overview of the video\n'
+                    '- "questions": an array of exactly 3 specific questions a viewer might ask\n\n'
+                    f"Transcript:\n{excerpt}\n\nJSON:"
+                ),
+            },
+        ],
+    )
+    content = response.choices[0].message.content.strip()
+    if content.startswith("```"):
+        parts = content.split("```")
+        content = parts[1].lstrip("json").strip() if len(parts) > 1 else content
+    return json.loads(content)
