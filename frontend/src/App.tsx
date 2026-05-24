@@ -3,6 +3,7 @@ import { AuthProvider, useAuth } from './context/AuthContext'
 import Login from './pages/Login'
 import Library from './pages/Library'
 import Chat from './pages/Chat'
+import Settings from './pages/Settings'
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { token } = useAuth()
@@ -18,6 +19,9 @@ function AppRoutes() {
       } />
       <Route path="/chat" element={
         <ProtectedRoute><Chat /></ProtectedRoute>
+      } />
+      <Route path="/settings" element={
+        <ProtectedRoute><Settings /></ProtectedRoute>
       } />
       <Route path="*" element={<Navigate to="/login" />} />
     </Routes>
