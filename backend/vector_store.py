@@ -12,13 +12,20 @@ def get_collection():
         metadata={"hnsw:space": "cosine"}
     )
 
-def add_chunks(video_id: str, chunks: list[str], embeddings: list[list[float]]):
+def add_chunks(video_id: str, chunks: list[str], embeddings: list[list[float]], start_times: list[float] | None = None):
     collection = get_collection()
     collection.add(
         documents=chunks,
         embeddings=embeddings,
         ids=[f"{video_id}_{i}" for i in range(len(chunks))],
-        metadatas=[{"video_id": video_id, "chunk_index": i} for i in range(len(chunks))]
+        metadatas=[
+            {
+                "video_id": video_id,
+                "chunk_index": i,
+                "start_time": start_times[i] if start_times else 0.0,
+            }
+            for i in range(len(chunks))
+        ]
     )
 
 def delete_chunks(video_id: str):

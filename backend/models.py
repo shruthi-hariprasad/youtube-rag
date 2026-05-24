@@ -13,6 +13,9 @@ class Video(Base):
     thumbnail_url = Column(String)
     url = Column(String)
     transcript_text = Column(Text)
+    transcript_segments = Column(Text, nullable=True)
+    summary = Column(Text, nullable=True)
+    suggested_questions = Column(Text, nullable=True)
     added_at = Column(DateTime(timezone=True), server_default=func.now())
 
 class User(Base):

@@ -29,6 +29,7 @@ def retrieve_chunks(
             "text": results["documents"][0][i],
             "video_id": results["metadatas"][0][i]["video_id"],
             "chunk_index": results["metadatas"][0][i]["chunk_index"],
+            "start_time": results["metadatas"][0][i].get("start_time", 0.0),
             "distance": results["distances"][0][i],
         })
 

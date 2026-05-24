@@ -1,29 +1,40 @@
 from contextlib import asynccontextmanager
 import asyncio
+import json
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 from urllib.parse import urlparse, parse_qs
 import requests
 from youtube_transcript_api import YouTubeTranscriptApi
 from .database import get_db, engine, SessionLocal
 from . import models
-from .chunker import chunk_text
+from .chunker import chunk_text, chunk_segments
 from .embedder import get_embeddings
 from .vector_store import add_chunks, delete_chunks, get_collection
 from .retriever import retrieve_chunks
-from .generator import generate_answer, stream_answer
+from .generator import generate_answer, stream_answer, generate_summary_and_questions
 from pydantic import BaseModel
 from .auth import hash_password, verify_password, create_token, decode_token
 import os
+
 
 class UserCreate(BaseModel):
     email: str
     password: str
 
+
+class QueryRequest(BaseModel):
+    question: str
+    video_id: str | None = None
+    history: list[dict] | None = None
+
+
 security_scheme = HTTPBearer()
+
 
 def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security_scheme)
@@ -33,66 +44,67 @@ def get_current_user(
         raise HTTPException(status_code=401, detail="Invalid or expired token")
     return user_id
 
+
 def extract_video_id(url: str) -> str | None:
-    """Extract a YouTube video ID from common URL formats.
-
-    Supported formats:
-    - https://www.youtube.com/watch?v=VIDEOID
-    - https://youtu.be/VIDEOID
-    - https://www.youtube.com/embed/VIDEOID
-    - https://www.youtube.com/shorts/VIDEOID
-
-    Returns the video ID string, or None if it can't be determined.
-    """
     try:
         parsed = urlparse(url)
         hostname = (parsed.hostname or "").lower()
 
-        # short youtu.be links -> path is /VIDEOID
         if hostname.endswith("youtu.be"):
             return parsed.path.lstrip("/") or None
 
-        # full youtube domains
         if "youtube" in hostname:
-            # check query string for v=
             qs = parse_qs(parsed.query)
             v = qs.get("v")
             if v:
                 return v[0]
 
-            # path-based formats: /embed/VIDEOID, /v/VIDEOID, /shorts/VIDEOID
             parts = [p for p in parsed.path.split("/") if p]
             if not parts:
                 return None
             if parts[0] in ("embed", "v", "shorts") and len(parts) >= 2:
                 return parts[1]
 
-            # fallback: use the last path segment
             return parts[-1]
 
     except Exception:
         return None
 
 
+def _run_migrations():
+    with engine.connect() as conn:
+        conn.execute(text("ALTER TABLE videos ADD COLUMN IF NOT EXISTS transcript_segments TEXT"))
+        conn.execute(text("ALTER TABLE videos ADD COLUMN IF NOT EXISTS summary TEXT"))
+        conn.execute(text("ALTER TABLE videos ADD COLUMN IF NOT EXISTS suggested_questions TEXT"))
+        conn.commit()
+
+
 def _reembed_if_empty():
-    """Re-embed all stored transcripts when ChromaDB is empty (e.g. after a Render redeploy)."""
     if get_collection().count() > 0:
         return
     db = SessionLocal()
     try:
         videos = db.query(models.Video).all()
         for video in videos:
-            if not video.transcript_text:
+            if video.transcript_segments:
+                segs = json.loads(video.transcript_segments)
+                pairs = chunk_segments(segs)
+                chunks = [p[0] for p in pairs]
+                times = [p[1] for p in pairs]
+            elif video.transcript_text:
+                chunks = chunk_text(video.transcript_text)
+                times = None
+            else:
                 continue
-            chunks = chunk_text(video.transcript_text)
             embeddings = get_embeddings(chunks)
-            add_chunks(video.youtube_video_id, chunks, embeddings)
+            add_chunks(video.youtube_video_id, chunks, embeddings, start_times=times)
     finally:
         db.close()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    await asyncio.to_thread(_run_migrations)
     await asyncio.to_thread(_reembed_if_empty)
     yield
 
@@ -107,8 +119,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Create database tables
 models.Base.metadata.create_all(bind=engine)
+
 
 @app.post("/auth/register")
 def register(user: UserCreate, db: Session = Depends(get_db)):
@@ -124,6 +136,7 @@ def register(user: UserCreate, db: Session = Depends(get_db)):
     db.refresh(new_user)
     return {"message": "User created successfully"}
 
+
 @app.post("/auth/login")
 def login(user: UserCreate, db: Session = Depends(get_db)):
     db_user = db.query(models.User).filter(models.User.email == user.email).first()
@@ -132,14 +145,13 @@ def login(user: UserCreate, db: Session = Depends(get_db)):
     token = create_token(db_user.id)
     return {"access_token": token, "token_type": "bearer"}
 
+
 @app.post("/videos")
 def add_video(url: str, db: Session = Depends(get_db), user_id: int = Depends(get_current_user)):
-    # Extract video ID first
     video_id = extract_video_id(url)
     if not video_id:
         raise HTTPException(status_code=400, detail="Could not extract video id from URL")
 
-    # Then check for duplicates
     existing = db.query(models.Video).filter(
         models.Video.youtube_video_id == video_id,
         models.Video.user_id == user_id
@@ -147,18 +159,6 @@ def add_video(url: str, db: Session = Depends(get_db), user_id: int = Depends(ge
     if existing:
         raise HTTPException(status_code=400, detail="You have already added this video")
 
-    try:
-        video_id = extract_video_id(url)
-        if not video_id:
-            # match requested behavior: treat extraction failure as a 400
-            raise ValueError("Could not extract video id from URL")
-    
-    
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-
-    # Fetch oEmbed metadata
     oembed_url = f"https://www.youtube.com/oembed?url={url}&format=json"
     resp = requests.get(oembed_url)
     if resp.status_code != 200:
@@ -169,7 +169,6 @@ def add_video(url: str, db: Session = Depends(get_db), user_id: int = Depends(ge
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON from oEmbed response")
 
-    # Fetch transcript
     try:
         proxy_username = os.getenv("WEBSHARE_PROXY_USERNAME")
         proxy_password = os.getenv("WEBSHARE_PROXY_PASSWORD")
@@ -186,11 +185,11 @@ def add_video(url: str, db: Session = Depends(get_db), user_id: int = Depends(ge
             ytt = YouTubeTranscriptApi()
 
         transcript_list = ytt.fetch(video_id)
-        transcript_text = " ".join([t.text for t in transcript_list])
+        segments = [{"text": t.text, "start": t.start} for t in transcript_list]
+        transcript_text = " ".join(s["text"] for s in segments)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Could not fetch transcript: {e}")
 
-    # Persist to DB
     video = models.Video(
         user_id=user_id,
         youtube_video_id=video_id,
@@ -199,6 +198,7 @@ def add_video(url: str, db: Session = Depends(get_db), user_id: int = Depends(ge
         thumbnail_url=metadata.get("thumbnail_url"),
         url=url,
         transcript_text=transcript_text,
+        transcript_segments=json.dumps(segments),
     )
 
     try:
@@ -206,14 +206,24 @@ def add_video(url: str, db: Session = Depends(get_db), user_id: int = Depends(ge
         db.commit()
         db.refresh(video)
 
-        # Chunk, embed, and store vectors in ChromaDB
-        chunks = chunk_text(video.transcript_text)
+        pairs = chunk_segments(json.loads(video.transcript_segments))
+        chunks = [p[0] for p in pairs]
+        times = [p[1] for p in pairs]
         embeddings = get_embeddings(chunks)
-        add_chunks(video.youtube_video_id, chunks, embeddings)
+        add_chunks(video.youtube_video_id, chunks, embeddings, start_times=times)
 
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=400, detail=f"Could not save video to database: {e}")
+
+    try:
+        sq = generate_summary_and_questions(video.transcript_text)
+        video.summary = sq.get("summary", "")
+        video.suggested_questions = json.dumps(sq.get("questions", []))
+        db.commit()
+        db.refresh(video)
+    except Exception:
+        pass
 
     return video
 
@@ -238,66 +248,42 @@ def delete_video(video_id: int, db: Session = Depends(get_db), user_id: int = De
     return {"message": "Video deleted successfully"}
 
 
+def _get_enriched_chunks(req: QueryRequest, db: Session, user_id: int) -> list[dict]:
+    user_videos = db.query(models.Video).filter(models.Video.user_id == user_id).all()
+    user_video_ids = [v.youtube_video_id for v in user_videos]
+    filter_ids = [req.video_id] if req.video_id else user_video_ids
+
+    if not filter_ids:
+        raise HTTPException(status_code=404, detail="No videos in your library yet")
+
+    chunks = retrieve_chunks(req.question, video_ids=filter_ids)
+
+    if not chunks:
+        raise HTTPException(status_code=404, detail="No relevant content found")
+
+    unique_video_ids = list(set(c["video_id"] for c in chunks))
+    videos = db.query(models.Video).filter(
+        models.Video.youtube_video_id.in_(unique_video_ids)
+    ).all()
+    title_map = {v.youtube_video_id: v.title for v in videos}
+
+    for chunk in chunks:
+        chunk["title"] = title_map.get(chunk["video_id"], chunk["video_id"])
+
+    return chunks
+
+
 @app.post("/query")
-def query(question: str, video_id: str | None = None, db: Session = Depends(get_db), user_id: int = Depends(get_current_user)):
-    # Get all video IDs belonging to this user
-    user_videos = db.query(models.Video).filter(models.Video.user_id == user_id).all()
-    user_video_ids = [v.youtube_video_id for v in user_videos]
-
-    # Filter to specific video or all user's videos
-    filter_ids = [video_id] if video_id else user_video_ids
-
-    if not filter_ids:
-        raise HTTPException(status_code=404, detail="No videos in your library yet")
-
-    # Step 1: retrieve relevant chunks from ChromaDB
-    chunks = retrieve_chunks(question, video_ids=filter_ids)
-
-    if not chunks:
-        raise HTTPException(status_code=404, detail="No relevant content found")
-
-    # Step 2: look up video titles from PostgreSQL using the video_ids
-    unique_video_ids = list(set([c["video_id"] for c in chunks]))
-    videos = db.query(models.Video).filter(
-        models.Video.youtube_video_id.in_(unique_video_ids)
-    ).all()
-    title_map = {v.youtube_video_id: v.title for v in videos}
-
-    # Step 3: enrich chunks with titles for the generator
-    for chunk in chunks:
-        chunk["title"] = title_map.get(chunk["video_id"], chunk["video_id"])
-
-    # Step 4: generate answer
-    result = generate_answer(question, chunks)
-
-    return result
+def query(req: QueryRequest, db: Session = Depends(get_db), user_id: int = Depends(get_current_user)):
+    chunks = _get_enriched_chunks(req, db, user_id)
+    return generate_answer(req.question, chunks, history=req.history)
 
 
-@app.get("/query/stream")
-def query_stream(question: str, video_id: str | None = None, db: Session = Depends(get_db), user_id: int = Depends(get_current_user)):
-    user_videos = db.query(models.Video).filter(models.Video.user_id == user_id).all()
-    user_video_ids = [v.youtube_video_id for v in user_videos]
-    filter_ids = [video_id] if video_id else user_video_ids
-
-    if not filter_ids:
-        raise HTTPException(status_code=404, detail="No videos in your library yet")
-
-    chunks = retrieve_chunks(question, video_ids=filter_ids)
-
-    if not chunks:
-        raise HTTPException(status_code=404, detail="No relevant content found")
-
-    unique_video_ids = list(set([c["video_id"] for c in chunks]))
-    videos = db.query(models.Video).filter(
-        models.Video.youtube_video_id.in_(unique_video_ids)
-    ).all()
-    title_map = {v.youtube_video_id: v.title for v in videos}
-
-    for chunk in chunks:
-        chunk["title"] = title_map.get(chunk["video_id"], chunk["video_id"])
-
+@app.post("/query/stream")
+def query_stream(req: QueryRequest, db: Session = Depends(get_db), user_id: int = Depends(get_current_user)):
+    chunks = _get_enriched_chunks(req, db, user_id)
     return StreamingResponse(
-        stream_answer(question, chunks),
+        stream_answer(req.question, chunks, history=req.history),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

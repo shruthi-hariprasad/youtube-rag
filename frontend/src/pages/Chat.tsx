@@ -1,5 +1,7 @@
 import { useState } from "react"
 import { useLocation, useNavigate } from "react-router-dom"
+import ReactMarkdown from "react-markdown"
+import remarkGfm from "remark-gfm"
 import Navbar from "../components/Navbar"
 
 const BASE_URL = import.meta.env.VITE_API_URL || "http://localhost:8000"
@@ -9,6 +11,7 @@ interface Source {
   title: string
   chunk_index: number
   text: string
+  start_time: number
 }
 
 interface Message {
@@ -18,11 +21,25 @@ interface Message {
 }
 
 interface Video {
+  id: number
   youtube_video_id: string
   title: string
   channel_name: string
   thumbnail_url: string
   url: string
+  summary?: string | null
+  suggested_questions?: string | null
+}
+
+function formatTime(seconds: number): string {
+  const m = Math.floor(seconds / 60)
+  const s = Math.floor(seconds % 60)
+  return `${m}:${s.toString().padStart(2, "0")}`
+}
+
+function parseQuestions(raw?: string | null): string[] {
+  if (!raw) return []
+  try { return JSON.parse(raw) } catch { return [] }
 }
 
 export default function Chat() {
@@ -36,6 +53,8 @@ export default function Chat() {
   const [error, setError] = useState("")
   const [expandedSources, setExpandedSources] = useState<Set<number>>(new Set())
 
+  const suggestedQuestions = parseQuestions(video?.suggested_questions)
+
   function toggleSources(idx: number) {
     setExpandedSources(prev => {
       const next = new Set(prev)
@@ -48,24 +67,33 @@ export default function Chat() {
   async function handleAsk(e: React.FormEvent) {
     e.preventDefault()
     if (!input.trim() || loading) return
+    submitQuestion(input)
+  }
 
-    const question = input
+  async function submitQuestion(question: string) {
     setMessages(prev => [...prev, { role: "user", content: question }])
     setInput("")
     setLoading(true)
     setError("")
-
-    // Optimistically add an empty assistant message that will be filled by the stream
     setMessages(prev => [...prev, { role: "assistant", content: "" }])
 
     try {
-      const url = new URL(`${BASE_URL}/query/stream`)
-      url.searchParams.set("question", question)
-      if (video) url.searchParams.set("video_id", video.youtube_video_id)
+      const history = messages
+        .slice(-6)
+        .map(m => ({ role: m.role, content: m.content }))
 
       const token = localStorage.getItem("token")
-      const response = await fetch(url.toString(), {
-        headers: { Authorization: `Bearer ${token}` },
+      const response = await fetch(`${BASE_URL}/query/stream`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          question,
+          video_id: video?.youtube_video_id ?? null,
+          history,
+        }),
       })
 
       if (!response.ok) {
@@ -115,10 +143,8 @@ export default function Chat() {
 
   return (
     <div className="min-h-screen bg-gray-50 flex flex-col">
-
       <Navbar />
 
-      {/* Sub-header: back button + video info */}
       <div className="bg-white border-b border-gray-200 px-6 py-3 flex items-center gap-4">
         <button
           onClick={() => navigate("/library")}
@@ -147,18 +173,33 @@ export default function Chat() {
         )}
       </div>
 
-      {/* Messages */}
       <div className="flex-1 max-w-3xl w-full mx-auto px-6 py-6 space-y-6">
         {messages.length === 0 && (
-          <div className="text-center text-gray-400 mt-20">
-            <p className="text-lg mb-1">
-              {video ? "Ask anything about this video" : "Ask anything across your library"}
-            </p>
-            <p className="text-sm">
-              {video
-                ? "The answer will be grounded in the transcript"
-                : "The answer will tell you which video it came from"}
-            </p>
+          <div className="mt-12 space-y-5">
+            <div className="text-center text-gray-400">
+              <p className="text-lg mb-1">
+                {video ? "Ask anything about this video" : "Ask anything across your library"}
+              </p>
+              {video?.summary && (
+                <p className="text-sm text-gray-500 max-w-lg mx-auto leading-relaxed mt-2">
+                  {video.summary}
+                </p>
+              )}
+            </div>
+
+            {suggestedQuestions.length > 0 && (
+              <div className="flex flex-wrap justify-center gap-2">
+                {suggestedQuestions.map((q, i) => (
+                  <button
+                    key={i}
+                    onClick={() => submitQuestion(q)}
+                    className="bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 rounded-full px-4 py-1.5 text-xs transition"
+                  >
+                    {q}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
         )}
 
@@ -172,14 +213,19 @@ export default function Chat() {
               </div>
             ) : (
               <div className="flex flex-col gap-2">
-                <div className="bg-white border border-gray-200 text-gray-800 text-sm px-4 py-3 rounded-2xl rounded-tl-sm max-w-xl shadow-sm whitespace-pre-wrap">
-                  {msg.content}
-                  {loading && i === messages.length - 1 && msg.content === "" && (
-                    <span className="inline-flex gap-1 pl-1">
+                <div className="bg-white border border-gray-200 text-gray-800 text-sm px-4 py-3 rounded-2xl rounded-tl-sm max-w-xl shadow-sm">
+                  {msg.content === "" && loading && i === messages.length - 1 ? (
+                    <span className="inline-flex gap-1">
                       <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce [animation-delay:0ms]" />
                       <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce [animation-delay:150ms]" />
                       <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce [animation-delay:300ms]" />
                     </span>
+                  ) : (
+                    <div className="[&_ul]:list-disc [&_ul]:pl-4 [&_ul]:space-y-1 [&_ol]:list-decimal [&_ol]:pl-4 [&_ol]:space-y-1 [&_strong]:font-semibold [&_p]:mb-2 [&_p:last-child]:mb-0 [&_li]:mb-0.5 [&_code]:font-mono [&_code]:bg-gray-100 [&_code]:px-1 [&_code]:rounded [&_h1]:font-bold [&_h2]:font-semibold [&_h3]:font-semibold">
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                        {msg.content}
+                      </ReactMarkdown>
+                    </div>
                   )}
                 </div>
 
@@ -197,7 +243,20 @@ export default function Chat() {
                       <div className="space-y-2 mt-2">
                         {msg.sources.map((src, j) => (
                           <div key={j} className="bg-gray-100 rounded-lg px-4 py-2.5 text-xs text-gray-600">
-                            <p className="font-medium text-gray-700 mb-1">{src.title} · chunk {src.chunk_index}</p>
+                            <div className="flex items-center justify-between mb-1">
+                              <p className="font-medium text-gray-700">{src.title}</p>
+                              {src.start_time != null && (
+                                <a
+                                  href={`https://www.youtube.com/watch?v=${src.video_id}&t=${Math.floor(src.start_time)}s`}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  onClick={e => e.stopPropagation()}
+                                  className="text-indigo-500 hover:underline shrink-0 ml-2"
+                                >
+                                  Watch at {formatTime(src.start_time)}
+                                </a>
+                              )}
+                            </div>
                             <p className="line-clamp-3 leading-relaxed">{src.text}</p>
                           </div>
                         ))}
@@ -213,7 +272,6 @@ export default function Chat() {
         {error && <p className="text-red-500 text-sm">{error}</p>}
       </div>
 
-      {/* Input */}
       <div className="bg-white border-t border-gray-200 px-6 py-4">
         <form onSubmit={handleAsk} className="max-w-3xl mx-auto flex gap-3">
           <input
@@ -233,7 +291,6 @@ export default function Chat() {
           </button>
         </form>
       </div>
-
     </div>
   )
 }
