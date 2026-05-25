@@ -17,7 +17,9 @@ export default function Navbar() {
         className="flex items-center gap-2 cursor-pointer group"
       >
         <div className="w-7 h-7 bg-indigo-600 rounded-lg flex items-center justify-center shrink-0">
-          <span className="text-sm leading-none">🎬</span>
+          <svg viewBox="0 0 24 24" fill="white" className="w-4 h-4 ml-0.5">
+            <path d="M8 5v14l11-7z" />
+          </svg>
         </div>
         <span className="font-bold text-gray-900 group-hover:text-indigo-600 transition text-sm">
           VideoMind

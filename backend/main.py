@@ -202,18 +202,25 @@ def add_video(url: str, db: Session = Depends(get_db), user_id: int = Depends(ge
         proxy_username = os.getenv("WEBSHARE_PROXY_USERNAME")
         proxy_password = os.getenv("WEBSHARE_PROXY_PASSWORD")
 
-        if proxy_username and proxy_password:
-            from youtube_transcript_api.proxies import WebshareProxyConfig
-            ytt = YouTubeTranscriptApi(
-                proxy_config=WebshareProxyConfig(
-                    proxy_username=proxy_username,
-                    proxy_password=proxy_password,
+        def _fetch(use_proxy: bool):
+            if use_proxy and proxy_username and proxy_password:
+                from youtube_transcript_api.proxies import WebshareProxyConfig
+                ytt = YouTubeTranscriptApi(
+                    proxy_config=WebshareProxyConfig(
+                        proxy_username=proxy_username,
+                        proxy_password=proxy_password,
+                    )
                 )
-            )
-        else:
-            ytt = YouTubeTranscriptApi()
+            else:
+                ytt = YouTubeTranscriptApi()
+            return ytt.fetch(video_id)
 
-        transcript_list = ytt.fetch(video_id)
+        # Try proxy first; if rate-limited fall back to direct
+        try:
+            transcript_list = _fetch(use_proxy=True)
+        except Exception:
+            transcript_list = _fetch(use_proxy=False)
+
         segments = [{"text": t.text, "start": t.start} for t in transcript_list]
         transcript_text = " ".join(s["text"] for s in segments)
     except Exception as e:
