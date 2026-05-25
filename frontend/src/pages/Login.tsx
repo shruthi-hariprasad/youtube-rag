@@ -42,7 +42,9 @@ export default function Login() {
         {/* Brand */}
         <div className="text-center mb-8">
           <div className="inline-flex items-center justify-center w-14 h-14 bg-indigo-600 rounded-2xl mb-4 shadow-lg shadow-indigo-900/50">
-            <span className="text-2xl">🎬</span>
+            <svg viewBox="0 0 24 24" fill="white" className="w-7 h-7 ml-1">
+              <path d="M8 5v14l11-7z" />
+            </svg>
           </div>
           <h1 className="text-2xl font-bold text-white tracking-tight">VideoMind</h1>
           <p className="text-slate-400 text-sm mt-1">Your AI-powered video library</p>
