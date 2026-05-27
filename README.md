@@ -19,7 +19,9 @@ I built this because I watch a lot of YouTube videos from creators I follow and 
 
 ## Screenshots
 
-*(add Library and Chat screenshots here)*
+| Library | Chat |
+|---------|------|
+| ![Library page showing a video card with thumbnail, title, channel, and summary](screenshots/library.png) | ![Chat page showing video context, AI-generated summary, suggested question chips, and chat input](screenshots/chat.png) |
 
 ---
 
