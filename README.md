@@ -92,16 +92,16 @@ python -m backend.eval.eval_harness --demo   # BM25 only, no API keys needed
 python -m backend.eval.eval_harness --full   # BM25 + dense + hybrid (needs HF_TOKEN)
 ```
 
-BM25 results on the included 11-question demo corpus (ML/optimization topic, 4-chunk transcript):
+BM25 results on the included 18-question demo corpus (9 chunks spanning optimization, CNNs, transformers, and training techniques):
 
 | Metric | BM25 |
 |--------|------|
-| Hit@1  | 0.55 |
-| Hit@3  | 1.00 |
+| Hit@1  | 0.67 |
+| Hit@3  | 0.89 |
 | Hit@5  | 1.00 |
-| MRR    | 0.71 |
+| MRR    | 0.79 |
 
-*Hit@3/5 saturate because the demo corpus has only 4 chunks — Hit@1 and MRR are the meaningful metrics at this scale. Run `--full` to compare BM25 vs. dense semantic vs. hybrid (BM25 + all-MiniLM-L6-v2 via RRF) on this corpus or against your own video library.*
+Run `--full` to compare BM25 vs. dense semantic vs. hybrid (BM25 + all-MiniLM-L6-v2 via RRF) on this corpus or against your own video library.
 
 ---
 

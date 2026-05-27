@@ -27,23 +27,35 @@ from rank_bm25 import BM25Okapi
 _SAMPLE_PATH = Path(__file__).parent / "sample_transcript.json"
 
 # Hand-labelled QA pairs: (question, ground_truth_chunk_index)
-# 4 chunks produced by the 300-word chunker with 50-word overlap:
+# 9 chunks produced by the 300-word chunker with 50-word overlap:
 # chunk 0: gradient descent definition, loss function, learning rate intro + "too large" warning
-# chunk 1: learning rate range test, cosine annealing, batch/SGD/mini-batch variants, backprop intro
-# chunk 2: backprop chain rule, forward/backward pass, vanishing gradient, Adam definition
-# chunk 3: Adam hyperparameters, RMSprop, L1/L2 regularization, dropout
+# chunk 1: learning rate range test, cosine annealing, batch/SGD/mini-batch variants
+# chunk 2: backprop chain rule, forward/backward pass, vanishing gradient, Adam intro
+# chunk 3: Adam beta hyperparameters, RMSprop, L1/L2 regularization, dropout
+# chunk 4: dropout overlap + CNN intro, convolutional filters, stride/padding, max/avg pooling, receptive field
+# chunk 5: residual networks, skip connections, degradation problem, transformer/self-attention, Q/K/V
+# chunk 6: attention scores computation, softmax, multi-head attention, positional encodings, feed-forward sublayer
+# chunk 7: batch normalization, scale/shift, internal covariate shift, layer normalization, early stopping
+# chunk 8: data augmentation, transfer learning, fine-tuning, frozen layers
 QA_PAIRS: list[tuple[str, int]] = [
     ("What is gradient descent?", 0),
-    ("What does the loss function measure?", 0),
-    ("What happens if the learning rate is too large?", 0),
+    ("What does a loss function measure?", 0),
     ("How does the learning rate range test work?", 1),
-    ("What is the difference between batch and stochastic gradient descent?", 1),
-    ("What batch size is typically used for mini-batch gradient descent?", 1),
-    ("How does backpropagation use the chain rule?", 2),
+    ("What is mini-batch gradient descent?", 1),
+    ("How does backpropagation compute gradients using the chain rule?", 2),
     ("What is the vanishing gradient problem?", 2),
-    ("How does the Adam optimizer work?", 2),
+    ("What are the beta1 and beta2 hyperparameters in Adam?", 3),
     ("What is the difference between L1 and L2 regularization?", 3),
-    ("How does dropout prevent overfitting?", 3),
+    ("What do convolutional filters detect in early layers?", 4),
+    ("What is max pooling?", 4),
+    ("How do residual networks solve the degradation problem?", 5),
+    ("What are query, key, and value vectors in self-attention?", 5),
+    ("How is the attention score between two tokens computed?", 6),
+    ("What do positional encodings do in transformers?", 6),
+    ("What is internal covariate shift?", 7),
+    ("What is early stopping and how does the patience parameter work?", 7),
+    ("How does data augmentation help prevent overfitting?", 8),
+    ("What happens when fine-tuning too many layers on a small dataset?", 8),
 ]
 
 
