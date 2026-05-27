@@ -204,4 +204,4 @@ youtube-rag/
 
 ---
 
-*Built by [Shruthi Hariprasad](https://github.com/shruthi-hariprasad) — MS CS, UMass Amherst*
+*Built by [Shruthi Hariprasad](https://github.com/shruthi-hariprasad)*
