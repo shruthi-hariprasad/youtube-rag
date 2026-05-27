@@ -28,6 +28,22 @@ def add_chunks(video_id: str, chunks: list[str], embeddings: list[list[float]], 
         ]
     )
 
+def get_chunks_for_videos(video_ids: list[str] | None = None) -> list[dict]:
+    collection = get_collection()
+    where = {"video_id": {"$in": video_ids}} if video_ids else None
+    results = collection.get(where=where, include=["documents", "metadatas"])
+    chunks = []
+    for i in range(len(results["documents"])):
+        chunks.append({
+            "text": results["documents"][i],
+            "video_id": results["metadatas"][i]["video_id"],
+            "chunk_index": results["metadatas"][i]["chunk_index"],
+            "start_time": results["metadatas"][i].get("start_time", 0.0),
+            "distance": None,
+        })
+    return chunks
+
+
 def delete_chunks(video_id: str):
     collection = get_collection()
     results = collection.get(where={"video_id": video_id})

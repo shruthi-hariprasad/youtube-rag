@@ -17,6 +17,12 @@ I built this because I watch a lot of YouTube videos from creators I follow and 
 
 ---
 
+## Screenshots
+
+*(add Library and Chat screenshots here)*
+
+---
+
 ## Architecture
 
 ```mermaid
@@ -50,6 +56,8 @@ flowchart LR
     B -->|Answer + sources| A
 ```
 
+Pipeline latency (production): ~120 ms for chunk retrieval (HuggingFace embedding call + ChromaDB cosine search); ~600 ms to first streamed token (Groq Llama 3.3 70B).
+
 ---
 
 ## How the RAG Pipeline Works
@@ -64,14 +72,34 @@ flowchart LR
 
 2. Query
    Question + chat history -> embed question in same vector space
-                           -> cosine similarity search across your video library
-                           -> top-5 most relevant chunks retrieved
-                           -> passed to Llama 3.3 70B with grounding instruction
+                           -> hybrid BM25 + cosine retrieval with RRF fusion
+                           -> distance threshold filters low-confidence results
+                           -> top-5 most relevant chunks passed to Llama 3.3 70B
                            -> answer streamed token-by-token via SSE
                            -> source cards show video title, chunk preview, and timestamp link
 ```
 
 Sentence-aware chunking means chunks never break mid-thought. The 50-word overlap means ideas that span chunk boundaries appear in both adjacent segments, so context is not lost at retrieval time.
+
+---
+
+## Retrieval Evaluation
+
+```bash
+python -m backend.eval.eval_harness --demo   # BM25 only, no API keys needed
+python -m backend.eval.eval_harness --full   # BM25 + dense + hybrid (needs HF_TOKEN)
+```
+
+BM25 results on the included 11-question demo corpus (ML/optimization topic, 4-chunk transcript):
+
+| Metric | BM25 |
+|--------|------|
+| Hit@1  | 0.55 |
+| Hit@3  | 1.00 |
+| Hit@5  | 1.00 |
+| MRR    | 0.71 |
+
+*Hit@3/5 saturate because the demo corpus has only 4 chunks — Hit@1 and MRR are the meaningful metrics at this scale. Run `--full` to compare BM25 vs. dense semantic vs. hybrid (BM25 + all-MiniLM-L6-v2 via RRF) on this corpus or against your own video library.*
 
 ---
 
@@ -83,13 +111,11 @@ Sentence-aware chunking means chunks never break mid-thought. The 50-word overla
 - Answers stream token by token rather than loading all at once
 - Conversation memory — follow-up questions work because the last 6 messages are passed as context
 - Source cards with "Watch at 2:34" timestamp links that jump to the exact moment in the video
-- Answers render with full markdown — bullets, bold, code blocks all display correctly
 
 **Library**
-- Auto-generated 2-sentence summary and 3 suggested questions appear when a video is added
+- Auto-generated 2-sentence summary and 3 suggested questions when a video is added
 - Suggested questions appear as clickable chips in the chat empty state
 - Search bar filters your library by video title or channel name
-- Progress indicator cycles through "Fetching transcript → Processing chunks → Generating embeddings → Generating summary" while a video is being added
 - Delete any video with the × button — removes both the PostgreSQL row and all ChromaDB vectors
 
 **Reliability**
@@ -147,9 +173,12 @@ youtube-rag/
 │   ├── auth.py          # JWT creation/verification, bcrypt hashing
 │   ├── chunker.py       # Sentence-aware chunking with configurable overlap
 │   ├── embedder.py      # HuggingFace Inference API client
-│   ├── vector_store.py  # ChromaDB PersistentClient wrapper (add, delete, existence check)
-│   ├── retriever.py     # Semantic search with optional video_id filter
+│   ├── vector_store.py  # ChromaDB PersistentClient wrapper (add, delete, query, bulk fetch)
+│   ├── retriever.py     # Hybrid BM25 + semantic search with RRF fusion and distance threshold
 │   ├── generator.py     # Groq/Llama 3.3 70B, grounded generation with sources and chat history
+│   ├── eval/
+│   │   ├── eval_harness.py       # Retrieval eval: Hit@K and MRR on labelled QA pairs
+│   │   └── sample_transcript.json  # Built-in ML/optimization transcript for offline evaluation
 │   ├── tests/
 │   │   └── test_main.py # pytest tests: register, login, duplicate username, invalid username, auth-protected routes
 │   └── requirements.txt
@@ -168,7 +197,7 @@ youtube-rag/
 ## Known Limitations
 
 - Videos without auto-generated captions cannot be transcribed — uncommon for popular creators but does happen
-- Dense retrieval can struggle when query vocabulary differs significantly from transcript vocabulary, a known limitation addressable with hybrid search (BM25 + semantic). A distance threshold to filter low-confidence chunks is on the roadmap but not yet calibrated
+- Hybrid BM25 + semantic retrieval (RRF fusion) and a distance threshold (default 0.8) are in place, but the optimal threshold will vary by domain; evaluate with `eval_harness.py --full` on your video library to calibrate
 - ChromaDB vectors are stored in-container on Render's free tier. The startup re-embed hook handles redeployments automatically, but a persistent volume would be cleaner in production
 
 ---
