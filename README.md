@@ -1,5 +1,5 @@
 # VideoMind: YouTube Transcript RAG Assistant
-Turn your YouTube watch history into a searchable knowledge base. Paste a video URL and VideoMind fetches the transcript, processes it, and lets you have a real conversation about it — with answers grounded in what was actually said, not what an LLM guesses was said.
+Turn your YouTube watch history into a searchable knowledge base. Paste a video URL and VideoMind fetches the transcript, processes it, and lets you have a real conversation about it — with answers grounded in what was actually said.
 
 **[Live Demo](https://youtube-rag-mu.vercel.app)**
 
