@@ -1,6 +1,5 @@
 # VideoMind: YouTube Transcript RAG Assistant
-
-Turn your YouTube watch history into a searchable knowledge base. Paste a video URL and VideoMind automatically ingests the transcript, then ask anything across your entire library and get answers grounded in what was actually said.
+Turn your YouTube watch history into a searchable knowledge base. Paste a video URL and VideoMind fetches the transcript, processes it, and lets you have a real conversation about it — with answers grounded in what was actually said, not what an LLM guesses was said.
 
 **[Live Demo](https://youtube-rag-mu.vercel.app)**
 
@@ -8,9 +7,11 @@ Turn your YouTube watch history into a searchable knowledge base. Paste a video 
 
 ## What It Does
 
-Paste any YouTube URL. VideoMind fetches the transcript automatically with no manual downloading or file uploads. The transcript gets chunked, embedded, and stored in a vector database tied to your account.
+Paste any YouTube URL. VideoMind fetches the transcript automatically, splits it into sentence-aware chunks, embeds them, and stores them in a vector database tied to your account.
 
-Then ask anything. "What did this video say about gradient descent?" or "Which of my saved videos covers backpropagation?" The app finds the most semantically relevant segments across your library and passes them to an LLM to generate an answer grounded in the actual transcript content.
+Then ask anything. "What did this video say about gradient descent?" or "Which of my saved videos covers backpropagation?" The app finds the most semantically relevant segments across your library, passes them to an LLM, and streams the answer back token by token — with clickable timestamp links that jump to the exact moment in the video the answer came from.
+
+Follow-up questions work too. The last 6 messages are passed as conversation history so the LLM understands context across a session.
 
 I built this because I watch a lot of YouTube videos from creators I follow and could never remember which one covered what.
 
@@ -23,30 +24,29 @@ flowchart LR
     subgraph Client
         A[React + TypeScript\nVercel]
     end
-
     subgraph Backend ["FastAPI Backend (Render)"]
         B[API Layer\nJWT Auth]
         C[RAG Pipeline]
+        D[SSE Stream]
     end
-
     subgraph Storage
-        D[(PostgreSQL\nUsers + Videos)]
-        E[(ChromaDB\nVector Store)]
+        E[(PostgreSQL\nUsers + Videos)]
+        F[(ChromaDB\nVector Store)]
     end
-
     subgraph External
-        F[youtube-transcript-api]
-        G[HuggingFace API\nall-MiniLM-L6-v2]
-        H[Groq API\nLlama 3]
+        G[youtube-transcript-api]
+        H[HuggingFace API\nall-MiniLM-L6-v2]
+        I[Groq API\nLlama 3.3 70B]
     end
-
     A -->|REST + JWT| B
-    B --> D
+    A -->|SSE| D
+    B --> E
     B --> C
-    C -->|Fetch transcript| F
-    C -->|Embed chunks| G
-    C -->|Store / retrieve| E
-    C -->|Generate answer| H
+    D --> C
+    C -->|Fetch transcript| G
+    C -->|Embed chunks| H
+    C -->|Store / retrieve| F
+    C -->|Generate answer| I
     B -->|Answer + sources| A
 ```
 
@@ -56,20 +56,49 @@ flowchart LR
 
 ```
 1. Ingest
-   YouTube URL -> fetch transcript (youtube-transcript-api)
-              -> chunk into 300-word segments with 50-word overlap
+   YouTube URL -> fetch transcript with timestamps (youtube-transcript-api)
+              -> sentence-aware chunking (~300 words, ~50-word overlap, never mid-sentence)
               -> embed each chunk (HuggingFace all-MiniLM-L6-v2)
-              -> store vectors in ChromaDB, metadata in PostgreSQL
+              -> store vectors in ChromaDB, metadata + timestamps in PostgreSQL
+              -> generate 2-sentence summary + 3 suggested questions (Groq)
 
 2. Query
-   Question -> embed in same vector space
-            -> cosine similarity search across your video library
-            -> top-5 most relevant chunks retrieved
-            -> passed to Llama 3 (Groq) with grounding instruction
-            -> answer returned with source attribution (video title + chunk)
+   Question + chat history -> embed question in same vector space
+                           -> cosine similarity search across your video library
+                           -> top-5 most relevant chunks retrieved
+                           -> passed to Llama 3.3 70B with grounding instruction
+                           -> answer streamed token-by-token via SSE
+                           -> source cards show video title, chunk preview, and timestamp link
 ```
 
-The 50-word overlap means ideas that span chunk boundaries show up in both adjacent segments, so context isn't lost at retrieval time.
+Sentence-aware chunking means chunks never break mid-thought. The 50-word overlap means ideas that span chunk boundaries appear in both adjacent segments, so context is not lost at retrieval time.
+
+---
+
+## Features
+
+**Core**
+- Add any YouTube video by URL — transcript is fetched and processed automatically
+- Ask questions against a single video or your entire library
+- Answers stream token by token rather than loading all at once
+- Conversation memory — follow-up questions work because the last 6 messages are passed as context
+- Source cards with "Watch at 2:34" timestamp links that jump to the exact moment in the video
+- Answers render with full markdown — bullets, bold, code blocks all display correctly
+
+**Library**
+- Auto-generated 2-sentence summary and 3 suggested questions appear when a video is added
+- Suggested questions appear as clickable chips in the chat empty state
+- Search bar filters your library by video title or channel name
+- Progress indicator cycles through "Fetching transcript → Processing chunks → Generating embeddings → Generating summary" while a video is being added
+- Delete any video with the × button — removes both the PostgreSQL row and all ChromaDB vectors
+
+**Reliability**
+- On startup, VideoMind checks whether ChromaDB vectors exist for each stored video and re-embeds any that are missing — so a Render redeploy no longer wipes your library
+- Proxy fallback — tries a rotating residential proxy first, falls back to a direct connection automatically if that fails
+
+**Account**
+- Username-based auth with clear error messages for invalid characters or duplicate usernames
+- Settings page: change password (requires current password), delete account with a confirmation dialog that cascades through all vectors and rows cleanly
 
 ---
 
@@ -77,12 +106,12 @@ The 50-word overlap means ideas that span chunk boundaries show up in both adjac
 
 | Layer | Technology |
 |-------|-----------|
-| Frontend | React, TypeScript, Vite, Tailwind CSS |
+| Frontend | React, TypeScript, Vite, Tailwind CSS, react-markdown |
 | Backend | Python, FastAPI, SQLAlchemy |
 | Database | PostgreSQL |
 | Vector Store | ChromaDB (cosine similarity) |
 | Embeddings | HuggingFace Inference API (`all-MiniLM-L6-v2`) |
-| LLM | Groq API (Llama 3) |
+| LLM | Groq API (Llama 3.3 70B Versatile) |
 | Auth | JWT (python-jose) + bcrypt |
 | Transcripts | youtube-transcript-api |
 | Infrastructure | Docker, Render (backend), Vercel (frontend) |
@@ -97,54 +126,13 @@ The 50-word overlap means ideas that span chunk boundaries show up in both adjac
 | POST | `/auth/login` | Login, returns JWT | No |
 | POST | `/videos` | Add video by YouTube URL | Yes |
 | GET | `/videos` | List your video library | Yes |
+| DELETE | `/videos/{id}` | Delete video and all its vectors | Yes |
 | POST | `/query` | Ask a question (single video or full library) | Yes |
+| POST | `/query/stream` | Same as above, streamed via SSE | Yes |
+| PUT | `/auth/password` | Change password | Yes |
+| DELETE | `/auth/account` | Delete account and all data | Yes |
 
 Full interactive docs available at `/docs` (Swagger UI).
-
----
-
-## Run Locally
-
-### Prerequisites
-- Python 3.11+
-- PostgreSQL
-- Node.js 18+
-- API keys: `HF_TOKEN` (HuggingFace) and `GROQ_API_KEY` (Groq)
-
-### Backend
-
-```bash
-git clone https://github.com/shruthi-hariprasad/youtube-rag.git
-cd youtube-rag/backend
-
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-
-cp .env.example .env
-# Fill in: DATABASE_URL, SECRET_KEY, HF_TOKEN, GROQ_API_KEY
-
-createdb youtube_rag
-cd ..
-uvicorn backend.main:app --reload
-```
-
-### Frontend
-
-```bash
-cd frontend
-npm install
-npm run dev
-```
-
-Set `VITE_API_URL=http://localhost:8000` in `frontend/.env`.
-
-### Docker
-
-```bash
-docker build -t youtube-rag-backend .
-docker run -p 8000:8000 --env-file backend/.env youtube-rag-backend
-```
 
 ---
 
@@ -153,23 +141,23 @@ docker run -p 8000:8000 --env-file backend/.env youtube-rag-backend
 ```
 youtube-rag/
 ├── backend/
-│   ├── main.py          # FastAPI app, 5 endpoints, CORS, auth middleware
+│   ├── main.py          # FastAPI app, all endpoints, CORS, auth middleware, startup re-embed hook
 │   ├── database.py      # SQLAlchemy engine and session
-│   ├── models.py        # User and Video ORM models
+│   ├── models.py        # User and Video ORM models (includes summary, suggested_questions, timestamps columns)
 │   ├── auth.py          # JWT creation/verification, bcrypt hashing
-│   ├── chunker.py       # Word-based chunking with configurable overlap
+│   ├── chunker.py       # Sentence-aware chunking with configurable overlap
 │   ├── embedder.py      # HuggingFace Inference API client
-│   ├── vector_store.py  # ChromaDB PersistentClient wrapper
+│   ├── vector_store.py  # ChromaDB PersistentClient wrapper (add, delete, existence check)
 │   ├── retriever.py     # Semantic search with optional video_id filter
-│   ├── generator.py     # Groq/Llama 3, grounded generation with sources
+│   ├── generator.py     # Groq/Llama 3.3 70B, grounded generation with sources and chat history
 │   ├── tests/
-│   │   └── test_main.py # 8 pytest tests covering auth flows and edge cases
+│   │   └── test_main.py # pytest tests: register, login, duplicate username, invalid username, auth-protected routes
 │   └── requirements.txt
 ├── frontend/
 │   ├── src/
-│   │   ├── pages/       # Login, Library, Chat
+│   │   ├── pages/       # Login, Library, Chat, Settings
 │   │   ├── components/  # Navbar
-│   │   ├── context/     # AuthContext (JWT)
+│   │   ├── context/     # AuthContext (JWT + username in localStorage)
 │   │   └── api/         # Axios instance with JWT interceptor
 │   └── vite.config.ts
 └── Dockerfile
@@ -179,9 +167,9 @@ youtube-rag/
 
 ## Known Limitations
 
-- Videos without auto-generated captions cannot be transcribed (uncommon for popular creators)
-- Dense retrieval can struggle when query vocabulary is very different from transcript vocabulary, a known limitation of this approach addressable with hybrid search (BM25 + semantic) or query rewriting
-- ChromaDB vectors are stored in-container on Render's free tier, so data persists between requests but resets on redeploy (fine for demo purposes; a persistent volume would be used in production)
+- Videos without auto-generated captions cannot be transcribed — uncommon for popular creators but does happen
+- Dense retrieval can struggle when query vocabulary differs significantly from transcript vocabulary, a known limitation addressable with hybrid search (BM25 + semantic). A distance threshold to filter low-confidence chunks is on the roadmap but not yet calibrated
+- ChromaDB vectors are stored in-container on Render's free tier. The startup re-embed hook handles redeployments automatically, but a persistent volume would be cleaner in production
 
 ---
 
