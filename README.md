@@ -65,8 +65,9 @@ Pipeline latency (production): ~120 ms for chunk retrieval (HuggingFace embeddin
 ## How the RAG Pipeline Works
 
 ```
-1. Ingest
+1. Ingest (async — returns 202 immediately, heavy work runs in background)
    YouTube URL -> fetch transcript with timestamps (youtube-transcript-api)
+              -> video row saved to PostgreSQL immediately (202 returned)
               -> sentence-aware chunking (~300 words, ~50-word overlap, never mid-sentence)
               -> embed each chunk (HuggingFace all-MiniLM-L6-v2)
               -> store vectors in ChromaDB, metadata + timestamps in PostgreSQL
@@ -108,7 +109,7 @@ Run `--full` to compare BM25 vs. dense semantic vs. hybrid (BM25 + all-MiniLM-L6
 ## Features
 
 **Core**
-- Add any YouTube video by URL — transcript is fetched and processed automatically
+- Add any YouTube video by URL — transcript is fetched and the video is saved immediately; embedding and summary generation run in the background
 - Ask questions against a single video or your entire library
 - Answers stream token by token rather than loading all at once
 - Conversation memory — follow-up questions work because the last 6 messages are passed as context
@@ -121,6 +122,7 @@ Run `--full` to compare BM25 vs. dense semantic vs. hybrid (BM25 + all-MiniLM-L6
 - Delete any video with the × button — removes both the PostgreSQL row and all ChromaDB vectors
 
 **Reliability**
+- Schema managed with Alembic — migrations run explicitly (`alembic upgrade head`) rather than on every startup, so schema changes are tracked, reversible, and safe to run in production
 - On startup, VideoMind checks whether ChromaDB vectors exist for each stored video and re-embeds any that are missing — so a Render redeploy no longer wipes your library
 - Proxy fallback — tries a rotating residential proxy first, falls back to a direct connection automatically if that fails
 
@@ -152,7 +154,7 @@ Run `--full` to compare BM25 vs. dense semantic vs. hybrid (BM25 + all-MiniLM-L6
 |--------|----------|-------------|------|
 | POST | `/auth/register` | Create account | No |
 | POST | `/auth/login` | Login, returns JWT | No |
-| POST | `/videos` | Add video by YouTube URL | Yes |
+| POST | `/videos` | Add video by URL — returns `202` immediately; embedding and summary run in background | Yes |
 | GET | `/videos` | List your video library | Yes |
 | DELETE | `/videos/{id}` | Delete video and all its vectors | Yes |
 | POST | `/query` | Ask a question (single video or full library) | Yes |
@@ -168,10 +170,16 @@ Full interactive docs available at `/docs` (Swagger UI).
 
 ```
 youtube-rag/
+├── alembic.ini
 ├── backend/
-│   ├── main.py          # FastAPI app, all endpoints, CORS, auth middleware, startup re-embed hook
+│   ├── alembic/
+│   │   ├── env.py                  # Alembic env wired to SQLAlchemy models + DATABASE_URL
+│   │   └── versions/
+│   │       ├── 0001_initial_schema.py                      # Baseline tables
+│   │       └── 0002_add_transcript_and_summary_columns.py  # transcript_segments, summary, suggested_questions
+│   ├── main.py          # FastAPI app, endpoints, CORS, auth middleware, background ingestion
 │   ├── database.py      # SQLAlchemy engine and session
-│   ├── models.py        # User and Video ORM models (includes summary, suggested_questions, timestamps columns)
+│   ├── models.py        # User and Video ORM models
 │   ├── auth.py          # JWT creation/verification, bcrypt hashing
 │   ├── chunker.py       # Sentence-aware chunking with configurable overlap
 │   ├── embedder.py      # HuggingFace Inference API client
@@ -182,7 +190,7 @@ youtube-rag/
 │   │   ├── eval_harness.py       # Retrieval eval: Hit@K and MRR on labelled QA pairs
 │   │   └── sample_transcript.json  # Built-in ML/optimization transcript for offline evaluation
 │   ├── tests/
-│   │   └── test_main.py # pytest tests: register, login, duplicate username, invalid username, auth-protected routes
+│   │   └── test_main.py # pytest: auth flows, video add/delete, query end-to-end (mocked external calls)
 │   └── requirements.txt
 ├── frontend/
 │   ├── src/
@@ -193,6 +201,18 @@ youtube-rag/
 │   └── vite.config.ts
 └── Dockerfile
 ```
+
+---
+
+## Deployment note
+
+Before starting the backend for the first time (or after pulling schema changes), run:
+
+```bash
+alembic upgrade head
+```
+
+The app no longer runs migrations on startup — they are explicit and tracked via Alembic.
 
 ---
 

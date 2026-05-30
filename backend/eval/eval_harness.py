@@ -24,6 +24,8 @@ from pathlib import Path
 
 from rank_bm25 import BM25Okapi
 
+from backend.chunker import chunk_segments as _chunk_segments_impl
+
 _SAMPLE_PATH = Path(__file__).parent / "sample_transcript.json"
 
 # Hand-labelled QA pairs: (question, ground_truth_chunk_index)
@@ -59,38 +61,7 @@ QA_PAIRS: list[tuple[str, int]] = [
 ]
 
 
-def _chunk_segments(segments: list[dict]) -> list[tuple[str, float]]:
-    """Mirrors backend/chunker.py chunk_segments without importing it."""
-    chunk_size = 300
-    overlap_size = 50
-    results: list[tuple[str, float]] = []
-    current: list[dict] = []
-    current_words = 0
-
-    for seg in segments:
-        text = seg.get("text", "").strip()
-        if not text:
-            continue
-        sw = len(text.split())
-        if current_words + sw > chunk_size and current:
-            results.append((" ".join(s["text"] for s in current), float(current[0]["start"])))
-            overlap: list[dict] = []
-            ow = 0
-            for s in reversed(current):
-                w = len(s["text"].split())
-                if ow + w <= overlap_size:
-                    overlap.insert(0, s)
-                    ow += w
-                else:
-                    break
-            current = overlap
-            current_words = ow
-        current.append({"text": text, "start": float(seg.get("start", 0.0))})
-        current_words += sw
-
-    if current:
-        results.append((" ".join(s["text"] for s in current), float(current[0]["start"])))
-    return results
+_chunk_segments = _chunk_segments_impl
 
 
 def _bm25_retrieve(query: str, chunks: list[str], n: int = 5) -> list[int]:

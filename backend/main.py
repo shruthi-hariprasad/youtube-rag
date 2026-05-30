@@ -1,11 +1,12 @@
 from contextlib import asynccontextmanager
 import asyncio
 import json
-from fastapi import FastAPI, Depends, HTTPException
+import logging
+import re
+from fastapi import FastAPI, Depends, HTTPException, BackgroundTasks
 from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import text
 from sqlalchemy.orm import Session
 from urllib.parse import urlparse, parse_qs
 import requests
@@ -20,6 +21,8 @@ from .generator import generate_answer, stream_answer, generate_summary_and_ques
 from pydantic import BaseModel
 from .auth import hash_password, verify_password, create_token, decode_token
 import os
+
+logger = logging.getLogger(__name__)
 
 
 class UserCreate(BaseModel):
@@ -76,14 +79,6 @@ def extract_video_id(url: str) -> str | None:
         return None
 
 
-def _run_migrations():
-    with engine.connect() as conn:
-        conn.execute(text("ALTER TABLE videos ADD COLUMN IF NOT EXISTS transcript_segments TEXT"))
-        conn.execute(text("ALTER TABLE videos ADD COLUMN IF NOT EXISTS summary TEXT"))
-        conn.execute(text("ALTER TABLE videos ADD COLUMN IF NOT EXISTS suggested_questions TEXT"))
-        conn.commit()
-
-
 def _reembed_if_empty():
     if get_collection().count() > 0:
         return
@@ -109,7 +104,6 @@ def _reembed_if_empty():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await asyncio.to_thread(_run_migrations)
     await asyncio.to_thread(_reembed_if_empty)
     yield
 
@@ -129,7 +123,6 @@ models.Base.metadata.create_all(bind=engine)
 
 @app.post("/auth/register")
 def register(user: UserCreate, db: Session = Depends(get_db)):
-    import re
     if not re.match(r'^[a-zA-Z0-9_.-]{3,30}$', user.username):
         raise HTTPException(status_code=400, detail="Username must be 3–30 characters: letters, numbers, _ . -")
     existing = db.query(models.User).filter(models.User.email == user.username).first()
@@ -175,8 +168,40 @@ def delete_account(db: Session = Depends(get_db), user_id: int = Depends(get_cur
     return {"message": "Account deleted"}
 
 
-@app.post("/videos")
-def add_video(url: str, db: Session = Depends(get_db), user_id: int = Depends(get_current_user)):
+def _ingest_video(video_db_id: int) -> None:
+    """Embed chunks and generate summary/questions in the background."""
+    db = SessionLocal()
+    try:
+        video = db.get(models.Video, video_db_id)
+        if not video:
+            return
+
+        pairs = chunk_segments(json.loads(video.transcript_segments))
+        chunks = [p[0] for p in pairs]
+        times = [p[1] for p in pairs]
+        embeddings = get_embeddings(chunks)
+        add_chunks(video.youtube_video_id, chunks, embeddings, start_times=times)
+
+        try:
+            sq = generate_summary_and_questions(video.transcript_text)
+            video.summary = sq.get("summary", "")
+            video.suggested_questions = json.dumps(sq.get("questions", []))
+            db.commit()
+        except Exception:
+            logger.exception("Failed to generate summary/questions for video %s", video_db_id)
+    except Exception:
+        logger.exception("Background ingestion failed for video %s", video_db_id)
+    finally:
+        db.close()
+
+
+@app.post("/videos", status_code=202)
+def add_video(
+    url: str,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    user_id: int = Depends(get_current_user),
+):
     video_id = extract_video_id(url)
     if not video_id:
         raise HTTPException(status_code=400, detail="Could not extract video id from URL")
@@ -215,7 +240,6 @@ def add_video(url: str, db: Session = Depends(get_db), user_id: int = Depends(ge
                 ytt = YouTubeTranscriptApi()
             return ytt.fetch(video_id)
 
-        # Try proxy first; if rate-limited fall back to direct
         try:
             transcript_list = _fetch(use_proxy=True)
         except Exception:
@@ -241,26 +265,11 @@ def add_video(url: str, db: Session = Depends(get_db), user_id: int = Depends(ge
         db.add(video)
         db.commit()
         db.refresh(video)
-
-        pairs = chunk_segments(json.loads(video.transcript_segments))
-        chunks = [p[0] for p in pairs]
-        times = [p[1] for p in pairs]
-        embeddings = get_embeddings(chunks)
-        add_chunks(video.youtube_video_id, chunks, embeddings, start_times=times)
-
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=400, detail=f"Could not save video to database: {e}")
 
-    try:
-        sq = generate_summary_and_questions(video.transcript_text)
-        video.summary = sq.get("summary", "")
-        video.suggested_questions = json.dumps(sq.get("questions", []))
-        db.commit()
-        db.refresh(video)
-    except Exception:
-        pass
-
+    background_tasks.add_task(_ingest_video, video.id)
     return video
 
 
