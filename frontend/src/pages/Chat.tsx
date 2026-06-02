@@ -295,10 +295,12 @@ export default function Chat() {
                         <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce [animation-delay:150ms]" />
                         <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce [animation-delay:300ms]" />
                       </span>
-                    ) : (
+                    ) : msg.content ? (
                       <div className="[&_ul]:list-disc [&_ul]:pl-4 [&_ul]:space-y-1 [&_ol]:list-decimal [&_ol]:pl-4 [&_ol]:space-y-1 [&_strong]:font-semibold [&_p]:mb-2 [&_p:last-child]:mb-0 [&_li]:mb-0.5 [&_code]:font-mono [&_code]:bg-gray-100 [&_code]:px-1 [&_code]:rounded">
                         <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
                       </div>
+                    ) : (
+                      <p className="text-gray-400 italic text-sm">No answer found.</p>
                     )}
                   </div>
 
