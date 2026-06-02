@@ -7,17 +7,26 @@ import Navbar from "../components/Navbar"
 const BASE_URL = import.meta.env.VITE_API_URL || "http://localhost:8000"
 
 interface Source {
-  video_id: string
+  video_id?: string
   title: string
-  chunk_index: number
+  chunk_index?: number
   text: string
-  start_time: number
+  start_time?: number
+  url?: string
+  source?: "video" | "web"
+}
+
+interface TraceStep {
+  tool: "search_videos" | "search_web"
+  query: string
+  count?: number
 }
 
 interface Message {
   role: "user" | "assistant"
   content: string
   sources?: Source[]
+  trace?: TraceStep[]
 }
 
 interface Video {
@@ -40,6 +49,39 @@ function formatTime(seconds: number): string {
 function parseQuestions(raw?: string | null): string[] {
   if (!raw) return []
   try { return JSON.parse(raw) } catch { return [] }
+}
+
+function ReasoningTrace({ trace }: { trace: TraceStep[] }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <div className="mt-1">
+      <button
+        onClick={() => setOpen(o => !o)}
+        className="flex items-center gap-1 text-xs text-gray-400 hover:text-gray-600 transition"
+      >
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}
+          className={`w-3 h-3 transition-transform ${open ? "rotate-90" : ""}`}>
+          <path strokeLinecap="round" strokeLinejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" />
+        </svg>
+        {open ? "Hide reasoning" : "Show reasoning"}
+      </button>
+      {open && (
+        <div className="mt-1.5 flex flex-col gap-1">
+          {trace.map((step, i) => (
+            <div key={i} className="flex items-baseline gap-1.5 text-xs text-gray-500">
+              <span className={`shrink-0 font-medium ${step.tool === "search_videos" ? "text-indigo-500" : "text-emerald-500"}`}>
+                {step.tool === "search_videos" ? "▶ video" : "⌕ web"}
+              </span>
+              <span className="italic truncate">&ldquo;{step.query}&rdquo;</span>
+              {step.count !== undefined && (
+                <span className="shrink-0 text-gray-400">· {step.count}</span>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
 }
 
 export default function Chat() {
@@ -80,69 +122,97 @@ export default function Chat() {
     setInput("")
     setLoading(true)
     setError("")
-    setMessages(prev => [...prev, { role: "assistant", content: "" }])
+    setMessages(prev => [...prev, { role: "assistant", content: "", trace: [] }])
 
     try {
-      const history = messages
-        .slice(-6)
-        .map(m => ({ role: m.role, content: m.content }))
-
       const token = localStorage.getItem("token")
-      const response = await fetch(`${BASE_URL}/query/stream`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({
-          question,
-          video_id: video?.youtube_video_id ?? null,
-          history,
-        }),
-      })
-
-      if (!response.ok) {
-        const err = await response.json()
-        throw new Error(err.detail || "Request failed")
-      }
-
-      const reader = response.body!.getReader()
-      const decoder = new TextDecoder()
-      let buffer = ""
-
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        buffer += decoder.decode(value, { stream: true })
-        const lines = buffer.split("\n")
-        buffer = lines.pop() ?? ""
-
-        for (const line of lines) {
-          if (!line.startsWith("data: ")) continue
-          const data = JSON.parse(line.slice(6))
-          if (data.token) {
-            setMessages(prev => {
-              const updated = [...prev]
-              const last = updated[updated.length - 1]
-              updated[updated.length - 1] = { ...last, content: last.content + data.token }
-              return updated
-            })
-          } else if (data.done) {
-            setMessages(prev => {
-              const updated = [...prev]
-              const last = updated[updated.length - 1]
-              updated[updated.length - 1] = { ...last, sources: data.sources }
-              return updated
-            })
-          }
-        }
-      }
+      await streamAgent(question, token)
     } catch (err: any) {
       setMessages(prev => prev.slice(0, -1))
       setError(err.message || "Something went wrong")
     } finally {
       setLoading(false)
     }
+  }
+
+  async function streamAgent(question: string, token: string | null) {
+    const response = await fetch(`${BASE_URL}/query/agent`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        question,
+        video_id: video?.youtube_video_id ?? null,
+      }),
+    })
+
+    if (!response.ok) {
+      const err = await response.json()
+      throw new Error(err.detail || "Request failed")
+    }
+
+    const reader = response.body!.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ""
+    // track pending tool call to pair with its result
+    let pendingTool: { tool: string; query: string } | null = null
+
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split("\n")
+      buffer = lines.pop() ?? ""
+
+      for (const line of lines) {
+        if (!line.startsWith("data: ")) continue
+        const data = JSON.parse(line.slice(6))
+
+        if (data.type === "tool_call") {
+          pendingTool = { tool: data.tool, query: data.query }
+          setMessages(prev => {
+            const updated = [...prev]
+            const last = { ...updated[updated.length - 1] }
+            last.trace = [...(last.trace ?? []), { tool: data.tool, query: data.query }]
+            updated[updated.length - 1] = last
+            return updated
+          })
+        } else if (data.type === "tool_result") {
+          pendingTool = null
+          setMessages(prev => {
+            const updated = [...prev]
+            const last = { ...updated[updated.length - 1] }
+            const trace = [...(last.trace ?? [])]
+            // update the last trace step with the count
+            if (trace.length > 0) {
+              trace[trace.length - 1] = { ...trace[trace.length - 1], count: data.count }
+            }
+            last.trace = trace
+            updated[updated.length - 1] = last
+            return updated
+          })
+        } else if (data.type === "token") {
+          setMessages(prev => {
+            const updated = [...prev]
+            const last = updated[updated.length - 1]
+            updated[updated.length - 1] = { ...last, content: last.content + data.token }
+            return updated
+          })
+        } else if (data.type === "done") {
+          setMessages(prev => {
+            const updated = [...prev]
+            const last = updated[updated.length - 1]
+            updated[updated.length - 1] = { ...last, sources: data.sources }
+            return updated
+          })
+        }
+      }
+    }
+
+    // suppress unused warning
+    void pendingTool
   }
 
   return (
@@ -177,6 +247,7 @@ export default function Chat() {
             <p className="text-xs text-gray-400">Answers will cite which video they came from</p>
           </div>
         )}
+
       </div>
 
       {/* Messages */}
@@ -231,6 +302,12 @@ export default function Chat() {
                     )}
                   </div>
 
+                  {/* Reasoning trace (agent mode) */}
+                  {msg.trace && msg.trace.length > 0 && (
+                    <ReasoningTrace trace={msg.trace} />
+                  )}
+
+                  {/* Sources */}
                   {msg.sources && msg.sources.length > 0 && (
                     <div>
                       <button
@@ -244,27 +321,28 @@ export default function Chat() {
                       </button>
 
                       {expandedSources.has(i) && (
-                        <div className="space-y-2 mt-2">
-                          {msg.sources.map((src, j) => (
-                            <div key={j} className="bg-white border border-gray-100 rounded-xl px-4 py-3 text-xs text-gray-600 shadow-sm">
-                              <div className="flex items-start justify-between gap-2 mb-1.5">
-                                <p className="font-medium text-gray-700 leading-snug">{src.title}</p>
-                                {src.start_time != null && (
+                        <div className="mt-1.5 flex flex-col gap-2">
+                          {msg.sources.slice(0, 4).map((src, j) => (
+                            <div key={j} className="flex gap-2 text-xs text-gray-500">
+                              <span className={`shrink-0 mt-0.5 ${src.source === "web" ? "text-emerald-500" : "text-indigo-400"}`}>
+                                {src.source === "web" ? "⌕" : "▶"}
+                              </span>
+                              <div className="min-w-0">
+                                {src.source === "web" ? (
+                                  <a href={src.url} target="_blank" rel="noopener noreferrer"
+                                    className="font-medium text-gray-600 hover:text-emerald-600 hover:underline transition">
+                                    {src.title}
+                                  </a>
+                                ) : (
                                   <a
-                                    href={`https://www.youtube.com/watch?v=${src.video_id}&t=${Math.floor(src.start_time)}s`}
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                    onClick={e => e.stopPropagation()}
-                                    className="shrink-0 flex items-center gap-1 text-indigo-500 hover:text-indigo-700 transition"
-                                  >
-                                    <svg viewBox="0 0 24 24" fill="currentColor" className="w-3 h-3">
-                                      <path d="M8 5v14l11-7z" />
-                                    </svg>
-                                    {formatTime(src.start_time)}
+                                    href={`https://www.youtube.com/watch?v=${src.video_id}&t=${Math.floor(src.start_time ?? 0)}s`}
+                                    target="_blank" rel="noopener noreferrer"
+                                    className="font-medium text-gray-600 hover:text-indigo-600 hover:underline transition">
+                                    {video ? formatTime(src.start_time ?? 0) : `${src.title} · ${formatTime(src.start_time ?? 0)}`}
                                   </a>
                                 )}
+                                <p className="text-gray-400 line-clamp-1 mt-0.5">{src.text}</p>
                               </div>
-                              <p className="line-clamp-3 leading-relaxed text-gray-500">{src.text}</p>
                             </div>
                           ))}
                         </div>
@@ -293,14 +371,14 @@ export default function Chat() {
             type="text"
             value={input}
             onChange={e => setInput(e.target.value)}
-            placeholder={video ? "Ask about this video..." : "Ask across your library..."}
+            placeholder={video ? "Ask about this video" : "Ask across your library"}
             className="flex-1 border border-gray-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition bg-slate-50"
             disabled={loading}
           />
           <button
             type="submit"
             disabled={loading || !input.trim()}
-            className="bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white px-4 py-2.5 rounded-xl transition flex items-center gap-1.5 text-sm font-medium"
+            className="disabled:opacity-50 text-white px-4 py-2.5 rounded-xl transition flex items-center gap-1.5 text-sm font-medium bg-indigo-600 hover:bg-indigo-700"
           >
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-4 h-4">
               <path strokeLinecap="round" strokeLinejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" />

@@ -18,6 +18,7 @@ from .embedder import get_embeddings
 from .vector_store import add_chunks, delete_chunks, get_collection
 from .retriever import retrieve_chunks
 from .generator import generate_answer, stream_answer, generate_summary_and_questions
+from .agent import run_agent
 from pydantic import BaseModel
 from .auth import hash_password, verify_password, create_token, decode_token
 import os
@@ -329,6 +330,23 @@ def query_stream(req: QueryRequest, db: Session = Depends(get_db), user_id: int 
     chunks = _get_enriched_chunks(req, db, user_id)
     return StreamingResponse(
         stream_answer(req.question, chunks, history=req.history),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.post("/query/agent")
+def query_agent(req: QueryRequest, db: Session = Depends(get_db), user_id: int = Depends(get_current_user)):
+    user_videos = db.query(models.Video).filter(models.Video.user_id == user_id).all()
+    user_video_ids = [v.youtube_video_id for v in user_videos]
+    filter_ids = [req.video_id] if req.video_id else user_video_ids
+    title_map = {v.youtube_video_id: v.title for v in user_videos}
+
+    if not filter_ids:
+        raise HTTPException(status_code=404, detail="No videos in your library yet")
+
+    return StreamingResponse(
+        run_agent(req.question, filter_ids, title_map),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

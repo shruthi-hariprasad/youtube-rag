@@ -9,22 +9,31 @@ client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
 MODEL = "llama-3.3-70b-versatile"
 
-_SYSTEM_PROMPT = """You are a helpful assistant that answers questions strictly based on YouTube video transcript excerpts provided to you.
+def _system_prompt(multi_video: bool) -> str:
+    source_rule = (
+        "- When referencing information from different videos, note which video it came from using the [Source: ...] labels"
+        if multi_video else
+        "- Do NOT include source labels or citations inline — the UI shows sources separately"
+    )
+    return f"""You are a helpful assistant that answers questions strictly based on YouTube video transcript excerpts provided to you.
 
 Rules:
 - Answer ONLY using information from the provided transcript excerpts
-- When referencing information, cite which video it came from using the [Source: ...] labels
+{source_rule}
 - If the answer is not in the transcripts, say exactly: "I couldn't find that information in these transcripts."
 - Never speculate, hallucinate, or draw on knowledge outside the provided excerpts
+- Do NOT start your answer with a title or heading — answer directly
 - Be specific, accurate, and concise
 - Use markdown formatting (bullet points, bold) where it improves readability"""
 
 
 def _build_messages(query: str, chunks: list[dict], history: list[dict] | None = None) -> list[dict]:
+    unique_videos = len(set(c.get("video_id", "") for c in chunks))
+    multi_video = unique_videos > 1
     context = "\n\n".join(
         f"[Source: {chunk['title']}]\n{chunk['text']}" for chunk in chunks
     )
-    messages = [{"role": "system", "content": _SYSTEM_PROMPT}]
+    messages = [{"role": "system", "content": _system_prompt(multi_video)}]
     if history:
         messages.extend(history[-6:])
     messages.append({
