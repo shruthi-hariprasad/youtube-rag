@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 MODEL = "llama-3.3-70b-versatile"
+DECISION_MODEL = "llama-3.1-8b-instant"
 
 _WEB_DECISION_SYSTEM = """You have been given a question and transcript excerpts retrieved from the user's video library.
 Decide whether web search is needed to give a complete answer.
@@ -55,7 +56,7 @@ def run_agent(question: str, video_ids: list[str], title_map: dict[str, str], me
 
         try:
             decision_response = client.chat.completions.create(
-                model=MODEL,
+                model=DECISION_MODEL,
                 messages=[
                     {"role": "system", "content": _WEB_DECISION_SYSTEM},
                     {"role": "user", "content": f"Question: {question}\n\nVideo excerpts:\n{video_summary}"},
@@ -133,7 +134,10 @@ def run_agent(question: str, video_ids: list[str], title_map: dict[str, str], me
 
         yield f"data: {json.dumps({'type': 'done', 'sources': unique_chunks})}\n\n"
 
-    except Exception:
+    except Exception as e:
         logger.exception("Agent pipeline error")
-        yield _err("Something went wrong. Please try again.")
+        if "rate_limit" in str(e).lower() or "429" in str(e):
+            yield _err("The AI service is temporarily at capacity. Please try again in a few minutes.")
+        else:
+            yield _err("Something went wrong. Please try again.")
         yield f"data: {json.dumps({'type': 'done', 'sources': []})}\n\n"
