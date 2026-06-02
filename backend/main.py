@@ -340,13 +340,30 @@ def query_agent(req: QueryRequest, db: Session = Depends(get_db), user_id: int =
     user_videos = db.query(models.Video).filter(models.Video.user_id == user_id).all()
     user_video_ids = [v.youtube_video_id for v in user_videos]
     filter_ids = [req.video_id] if req.video_id else user_video_ids
-    title_map = {v.youtube_video_id: v.title for v in user_videos}
+    title_map = {
+        v.youtube_video_id: f"{v.title} (channel: {v.channel_name})" if v.channel_name else v.title
+        for v in user_videos
+    }
+    # Metadata chunks let the synthesizer answer questions about the video itself
+    # (title, channel) that would never appear in the transcript text
+    meta_chunks = [
+        {
+            "video_id": v.youtube_video_id,
+            "title": title_map[v.youtube_video_id],
+            "text": f"Video title: {v.title}\nChannel: {v.channel_name or 'unknown'}\nURL: {v.url}",
+            "source": "video",
+            "chunk_index": -1,
+            "start_time": 0.0,
+        }
+        for v in user_videos
+        if v.youtube_video_id in filter_ids
+    ]
 
     if not filter_ids:
         raise HTTPException(status_code=404, detail="No videos in your library yet")
 
     return StreamingResponse(
-        run_agent(req.question, filter_ids, title_map),
+        run_agent(req.question, filter_ids, title_map, meta_chunks),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

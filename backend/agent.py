@@ -29,7 +29,7 @@ _SYNTHESIZER_SYSTEM = """You are a helpful assistant. Synthesize the provided so
 - If no sources contain relevant information, say so honestly"""
 
 
-def run_agent(question: str, video_ids: list[str], title_map: dict[str, str]):
+def run_agent(question: str, video_ids: list[str], title_map: dict[str, str], meta_chunks: list[dict] | None = None):
     """Generator yielding SSE-formatted strings for the agent reasoning trace and answer."""
 
     # Step 1: always search videos first (no LLM needed for this decision)
@@ -40,8 +40,12 @@ def run_agent(question: str, video_ids: list[str], title_map: dict[str, str]):
         c["source"] = "video"
     yield f"data: {json.dumps({'type': 'tool_result', 'tool': 'search_videos', 'count': len(video_chunks)})}\n\n"
 
+    # Prepend metadata chunks (title, channel) so the synthesizer can answer
+    # questions about the video itself that won't appear in transcript text
+    all_video_chunks = list(meta_chunks or []) + video_chunks
+
     # Step 2: one LLM call to decide if web search is needed
-    video_summary = "\n\n".join(f"[{c['title']}]\n{c['text']}" for c in video_chunks[:3]) or "(no results)"
+    video_summary = "\n\n".join(f"[{c['title']}]\n{c['text']}" for c in all_video_chunks[:4]) or "(no results)"
     decision_response = client.chat.completions.create(
         model=MODEL,
         messages=[
@@ -59,7 +63,7 @@ def run_agent(question: str, video_ids: list[str], title_map: dict[str, str]):
     except Exception:
         decision = {"web_needed": False}
 
-    all_chunks: list[dict] = list(video_chunks)
+    all_chunks: list[dict] = list(all_video_chunks)
 
     # Step 3: optionally search the web
     if decision.get("web_needed") and decision.get("query"):
