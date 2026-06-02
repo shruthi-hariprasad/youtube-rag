@@ -31,6 +31,7 @@ _SYNTHESIZER_SYSTEM = """You are a helpful assistant. Synthesize the provided so
 
 def run_agent(question: str, video_ids: list[str], title_map: dict[str, str], meta_chunks: list[dict] | None = None):
     """Generator yielding SSE-formatted strings for the agent reasoning trace and answer."""
+    _meta = list(meta_chunks or [])
 
     # Step 1: always search videos first (no LLM needed for this decision)
     yield f"data: {json.dumps({'type': 'tool_call', 'tool': 'search_videos', 'query': question})}\n\n"
@@ -40,12 +41,11 @@ def run_agent(question: str, video_ids: list[str], title_map: dict[str, str], me
         c["source"] = "video"
     yield f"data: {json.dumps({'type': 'tool_result', 'tool': 'search_videos', 'count': len(video_chunks)})}\n\n"
 
-    # Prepend metadata chunks (title, channel) so the synthesizer can answer
-    # questions about the video itself that won't appear in transcript text
-    all_video_chunks = list(meta_chunks or []) + video_chunks
-
     # Step 2: one LLM call to decide if web search is needed
-    video_summary = "\n\n".join(f"[{c['title']}]\n{c['text']}" for c in all_video_chunks[:4]) or "(no results)"
+    # Include meta chunks in the summary so the LLM can see title/channel info
+    meta_summary = "\n\n".join(f"[{c['title']}]\n{c['text']}" for c in _meta)
+    transcript_summary = "\n\n".join(f"[{c['title']}]\n{c['text']}" for c in video_chunks[:3])
+    video_summary = (meta_summary + "\n\n" + transcript_summary).strip() or "(no results)"
     decision_response = client.chat.completions.create(
         model=MODEL,
         messages=[
@@ -63,7 +63,7 @@ def run_agent(question: str, video_ids: list[str], title_map: dict[str, str], me
     except Exception:
         decision = {"web_needed": False}
 
-    all_chunks: list[dict] = list(all_video_chunks)
+    all_chunks: list[dict] = list(video_chunks)
 
     # Step 3: optionally search the web
     if decision.get("web_needed") and decision.get("query"):
@@ -82,7 +82,7 @@ def run_agent(question: str, video_ids: list[str], title_map: dict[str, str], me
             seen.add(key)
             unique_chunks.append(c)
 
-    # Re-rank against the original question (single batched embedding call)
+    # Re-rank transcript/web chunks against the original question
     if unique_chunks:
         texts = [c.get("text", "") for c in unique_chunks]
         all_embs = np.array(get_embeddings([question] + texts))
@@ -94,14 +94,18 @@ def run_agent(question: str, video_ids: list[str], title_map: dict[str, str], me
             c["_relevance"] = float(np.dot(q_emb, c_emb) / norm) if norm > 0 else 0.0
         unique_chunks.sort(key=lambda c: c["_relevance"], reverse=True)
 
-    if not unique_chunks:
+    # Meta chunks always come first — they're never re-ranked out since they hold
+    # library-level facts (title, channel) that transcript search can't surface
+    final_chunks = _meta + unique_chunks
+
+    if not final_chunks:
         yield f"data: {json.dumps({'type': 'token', 'token': 'I could not find relevant information to answer your question.'})}\n\n"
         yield f"data: {json.dumps({'type': 'done', 'sources': []})}\n\n"
         return
 
     context = "\n\n".join(
         f"[{'Video' if c.get('source') == 'video' else 'Web'}: {c['title']}]\n{c['text']}"
-        for c in unique_chunks
+        for c in final_chunks
     )
 
     synth_messages = [
@@ -122,3 +126,4 @@ def run_agent(question: str, video_ids: list[str], title_map: dict[str, str], me
             yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
 
     yield f"data: {json.dumps({'type': 'done', 'sources': unique_chunks})}\n\n"
+    # note: meta chunks are excluded from sources panel (no timestamp to show)
