@@ -49,10 +49,9 @@ def run_agent(question: str, video_ids: list[str], title_map: dict[str, str], me
         yield f"data: {json.dumps({'type': 'tool_result', 'tool': 'search_videos', 'count': len(video_chunks)})}\n\n"
 
         # Step 2: one LLM call to decide if web search is needed
-        # Limit meta summary to avoid bloating the decision prompt
-        meta_summary = "\n\n".join(f"[{c['title']}]\n{c['text']}" for c in _meta[:3])
-        transcript_summary = "\n\n".join(f"[{c['title']}]\n{c['text']}" for c in video_chunks[:3])
-        video_summary = (meta_summary + "\n\n" + transcript_summary).strip() or "(no results)"
+        # Keep decision prompt small — just top 2 transcript chunks, no meta
+        transcript_summary = "\n\n".join(f"[{c['title']}]\n{c['text'][:300]}" for c in video_chunks[:2])
+        video_summary = transcript_summary.strip() or "(no results)"
 
         try:
             decision_response = client.chat.completions.create(
