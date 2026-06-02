@@ -7,7 +7,7 @@ load_dotenv()
 
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
-MODEL = "llama-3.3-70b-versatile"
+MODEL = "llama-3.1-8b-instant"  # 500k TPD free quota
 
 def _system_prompt(multi_video: bool) -> str:
     source_rule = (

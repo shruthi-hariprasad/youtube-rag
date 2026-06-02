@@ -12,7 +12,7 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-MODEL = "llama-3.3-70b-versatile"
+MODEL = "llama-3.1-8b-instant"       # 500k TPD free quota — used for all agent calls
 DECISION_MODEL = "llama-3.1-8b-instant"
 
 _WEB_DECISION_SYSTEM = """You have been given a question and transcript excerpts retrieved from the user's video library.
@@ -111,8 +111,8 @@ def run_agent(question: str, video_ids: list[str], title_map: dict[str, str], me
             return
 
         context = "\n\n".join(
-            f"[{'Video' if c.get('source') == 'video' else 'Web'}: {c['title']}]\n{c['text']}"
-            for c in final_chunks
+            f"[{'Video' if c.get('source') == 'video' else 'Web'}: {c['title']}]\n{c['text'][:400]}"
+            for c in final_chunks[:6]
         )
 
         synth_messages = [
