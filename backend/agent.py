@@ -25,11 +25,12 @@ Reply with valid JSON only, one of:
 Use web_needed=true only if the video excerpts clearly cannot answer the question.
 If the excerpts contain a reasonable answer, use web_needed=false."""
 
-_SYNTHESIZER_SYSTEM = """You are a helpful assistant. Synthesize the provided sources into a clear, accurate answer.
+_SYNTHESIZER_SYSTEM = """You are a helpful assistant. Answer strictly based on the provided sources.
 - Do NOT include inline citations, source labels, or a title/heading at the start
-- If sources conflict, note it briefly
+- Do NOT invent, infer, or guess information not explicitly present in the sources
+- If the sources list specific videos, only mention those exact videos — do not imply there are more
 - Be concise and well-structured using markdown where helpful
-- If no sources contain relevant information, say so honestly"""
+- If the sources do not contain enough information to answer, say so honestly"""
 
 
 def _err(msg: str):
