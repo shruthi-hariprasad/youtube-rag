@@ -132,13 +132,18 @@ def run_agent(question: str, video_ids: list[str], title_map: dict[str, str], me
             if token:
                 yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
 
-        # Only surface sources with meaningful relevance to the question
-        # Threshold 0.5: below this the chunk wasn't really about the question
-        relevant_sources = [
-            c for c in unique_chunks
-            if c.get("_relevance", 0) >= 0.5 and c.get("chunk_index", 0) != -1
-        ]
-        yield f"data: {json.dumps({'type': 'done', 'sources': relevant_sources})}\n\n"
+        # One source per video (highest relevance), one per web URL
+        # Only include if relevance is meaningful (>= 0.5)
+        seen_source: set[str] = set()
+        display_sources = []
+        for c in unique_chunks:
+            if c.get("_relevance", 0) < 0.5:
+                continue
+            key = c.get("video_id") or c.get("url", "")
+            if key and key not in seen_source:
+                seen_source.add(key)
+                display_sources.append(c)
+        yield f"data: {json.dumps({'type': 'done', 'sources': display_sources})}\n\n"
 
     except Exception as e:
         logger.exception("Agent pipeline error")
