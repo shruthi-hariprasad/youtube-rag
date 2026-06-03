@@ -10,7 +10,7 @@ Turn your YouTube watch history into a searchable knowledge base. Paste a video 
 
 Paste any YouTube URL. VideoMind fetches the transcript automatically, splits it into sentence-aware chunks, embeds them, and stores them in a vector database tied to your account.
 
-Then ask anything. "What did this video say about gradient descent?" or "Which of my saved videos covers backpropagation?" An agent searches your video library and — when the question calls for it — the web, then synthesizes a final answer from both sources.
+Then ask anything. "What did this video say about mental preparation?" or "Which of my saved videos covers climbing?" An agent searches your video library and — when the question calls for it — the web, then synthesizes a final answer from both sources.
 
 The answer streams back token by token with a collapsible reasoning trace showing which sources were checked, and timestamp links that jump to the exact moment in the video.
 
@@ -45,7 +45,7 @@ flowchart LR
     subgraph External
         G[youtube-transcript-api]
         H[HuggingFace API\nall-MiniLM-L6-v2]
-        I[Groq API\nLlama 3.3 70B]
+        I[Groq API\nLlama 3.1 8B]
         J[Tavily Search API]
     end
     A -->|REST + JWT| B
@@ -61,35 +61,37 @@ flowchart LR
     B -->|Answer + sources + trace| A
 ```
 
-Pipeline latency (production): ~120 ms for chunk retrieval (HuggingFace embedding call + ChromaDB cosine search); ~600 ms to first streamed token (Groq Llama 3.3 70B).
+Pipeline latency (production): ~120 ms for chunk retrieval (HuggingFace embedding call + ChromaDB cosine search); ~400 ms to first streamed token (Groq Llama 3.1 8B Instant).
 
 ---
 
 ## How the Agent Pipeline Works
 
 ```
-Every question goes through a two-stage agentic flow:
+Every question goes through a structured agentic flow:
 
-1. Video search (always)
+1. Video search (always, no LLM needed)
    Question -> hybrid BM25 + cosine retrieval with RRF fusion
             -> top-5 chunks from the user's video library
+            -> metadata chunk (title, channel, URL) always included for each video
 
-2. Web decision (LLM-driven)
-   Video results -> Llama 3.3 70B decides: "is this enough to answer the question?"
+2. Web decision (small LLM call — Llama 3.1 8B)
+   Video results -> "is this enough to answer the question?"
                  -> if yes: skip web search
                  -> if no: generate a focused web query, run Tavily search
 
 3. Re-rank
    All collected chunks (video + web) -> re-embed with original question
                                       -> sort by cosine similarity
+                                      -> metadata chunks pinned to top (never re-ranked out)
 
 4. Synthesize
-   Top chunks -> Llama 3.3 70B streams final answer
-              -> sources emitted as SSE event with video timestamps and web URLs
+   Top chunks -> Llama 3.1 8B streams final answer
+              -> only sources with relevance >= 0.5 surfaced to UI
+              -> one source entry per video, deduped by video_id
 
-The reasoning trace (which sources were searched and what queries were used) is
-streamed to the UI in real time as SSE events, so the user can see the agent's
-decisions as they happen.
+The reasoning trace (tool called, query used, result count) streams to the UI
+in real time as SSE events, so decisions are visible as they happen.
 ```
 
 ```
@@ -129,16 +131,17 @@ Run `--full` to compare BM25 vs. dense semantic vs. hybrid (BM25 + all-MiniLM-L6
 ## Features
 
 **Agent**
-- Every question first searches your video library, then an LLM decides whether web search is needed — not a fixed rule, but a reasoned decision based on what the video results actually contain
+- Every question first searches the video library (always), then a small LLM decides whether web search is needed — a reasoned decision based on what the video results actually contain, not a fixed rule
+- Metadata chunks (title, channel name, URL) are always injected into context so questions like "who is this YouTuber?" or "which of my videos are about X?" are answered correctly without transcript search
 - Reasoning trace streams in real time: which tool was called, what query was used, how many results came back
-- All sources (video chunks + web results) are re-ranked by cosine similarity to the original question before synthesis
-- Web search degrades gracefully — if Tavily is unavailable, the agent falls back to video-only
+- All transcript and web chunks are re-ranked by cosine similarity to the original question before synthesis
+- Sources panel shows one entry per video (highest-relevance chunk), only when relevance exceeds a threshold — no noisy timestamps for metadata-only answers
+- Web search degrades gracefully — if Tavily is unavailable or quota is exceeded, the agent falls back to video-only
 
 **Core**
 - Add any YouTube video by URL — transcript is fetched and the video is saved immediately; embedding and summary generation run in the background
 - Ask questions against a single video or your entire library
 - Answers stream token by token rather than loading all at once
-- Conversation memory — follow-up questions work because the last 6 messages are passed as context
 - Source cards with timestamp links that jump to the exact moment in the video; web sources show title and URL
 
 **Library**
@@ -148,13 +151,14 @@ Run `--full` to compare BM25 vs. dense semantic vs. hybrid (BM25 + all-MiniLM-L6
 - Delete any video with the × button — removes both the PostgreSQL row and all ChromaDB vectors
 
 **Reliability**
-- Schema managed with Alembic — migrations run explicitly (`alembic upgrade head`) rather than on every startup, so schema changes are tracked, reversible, and safe to run in production
-- On startup, VideoMind checks whether ChromaDB vectors exist for each stored video and re-embeds any that are missing — so a Render redeploy no longer wipes your library
-- Proxy fallback — tries a rotating residential proxy first, falls back to a direct connection automatically if that fails
+- Schema managed with Alembic — migrations run explicitly (`alembic upgrade head`) rather than on every startup
+- On startup, VideoMind checks whether ChromaDB vectors exist for each stored video and re-embeds any that are missing — a Render redeploy does not wipe your library
+- Proxy fallback — tries a rotating residential proxy first for transcript fetching, falls back to direct connection automatically
+- Agent errors surface as readable messages in the UI rather than silent failures
 
 **Account**
 - Username-based auth with clear error messages for invalid characters or duplicate usernames
-- Settings page: change password (requires current password), delete account with a confirmation dialog that cascades through all vectors and rows cleanly
+- Settings page: change password (requires current password), delete account with confirmation dialog that cascades through all vectors and rows
 
 ---
 
@@ -167,7 +171,7 @@ Run `--full` to compare BM25 vs. dense semantic vs. hybrid (BM25 + all-MiniLM-L6
 | Database | PostgreSQL |
 | Vector Store | ChromaDB (cosine similarity) |
 | Embeddings | HuggingFace Inference API (`all-MiniLM-L6-v2`) |
-| LLM | Groq API (Llama 3.3 70B Versatile) |
+| LLM | Groq API (Llama 3.1 8B Instant) |
 | Web Search | Tavily Search API |
 | Auth | JWT (python-jose) + bcrypt |
 | Transcripts | youtube-transcript-api |
@@ -186,7 +190,7 @@ Run `--full` to compare BM25 vs. dense semantic vs. hybrid (BM25 + all-MiniLM-L6
 | DELETE | `/videos/{id}` | Delete video and all its vectors | Yes |
 | POST | `/query` | Ask a question (non-streaming) | Yes |
 | POST | `/query/stream` | Ask a question, streamed via SSE | Yes |
-| POST | `/query/agent` | Agentic query — searches videos, decides on web search, streams reasoning trace + answer via SSE | Yes |
+| POST | `/query/agent` | Agentic query — always searches videos first, decides on web search via LLM, streams reasoning trace + answer via SSE | Yes |
 | PUT | `/auth/password` | Change password | Yes |
 | DELETE | `/auth/account` | Delete account and all data | Yes |
 
@@ -213,7 +217,7 @@ youtube-rag/
 │   ├── embedder.py      # HuggingFace Inference API client
 │   ├── vector_store.py  # ChromaDB PersistentClient wrapper (add, delete, query, bulk fetch)
 │   ├── retriever.py     # Hybrid BM25 + semantic search with RRF fusion and distance threshold
-│   ├── generator.py     # Groq/Llama 3.3 70B, grounded generation with sources and chat history
+│   ├── generator.py     # Groq LLM, grounded generation with sources and chat history
 │   ├── agent.py         # Agentic pipeline: video search → LLM web decision → re-rank → synthesize
 │   ├── web_search.py    # Tavily Search API wrapper with graceful fallback
 │   ├── eval/
@@ -223,6 +227,7 @@ youtube-rag/
 │   │   └── test_main.py # pytest: auth flows, video add/delete, query end-to-end (mocked external calls)
 │   └── requirements.txt
 ├── frontend/
+│   ├── vercel.json      # SPA routing rewrite — all routes serve index.html
 │   ├── src/
 │   │   ├── pages/       # Login, Library, Chat, Settings
 │   │   ├── components/  # Navbar
@@ -240,7 +245,7 @@ youtube-rag/
 |----------|----------|-------------|
 | `DATABASE_URL` | Yes | PostgreSQL connection string |
 | `SECRET_KEY` | Yes | JWT signing secret |
-| `GROQ_API_KEY` | Yes | Groq API key (Llama 3.3 70B) |
+| `GROQ_API_KEY` | Yes | Groq API key |
 | `HF_TOKEN` | Yes | HuggingFace token (embeddings) |
 | `TAVILY_API_KEY` | No | Tavily Search API key — web search is skipped if not set |
 | `WEBSHARE_PROXY_USERNAME` | No | Proxy credentials for transcript fetching |
@@ -263,8 +268,9 @@ The app no longer runs migrations on startup — they are explicit and tracked v
 ## Known Limitations
 
 - Videos without auto-generated captions cannot be transcribed — uncommon for popular creators but does happen
-- Hybrid BM25 + semantic retrieval (RRF fusion) and a distance threshold (default 0.8) are in place, but the optimal threshold will vary by domain; evaluate with `eval_harness.py --full` on your video library to calibrate
-- ChromaDB vectors are stored in-container on Render's free tier. The startup re-embed hook handles redeployments automatically, but a persistent volume would be cleaner in production
+- YouTube blocks transcript requests from cloud provider IPs (Render); a residential proxy (Webshare) is used to work around this — if the proxy quota is exhausted, video ingestion will fail until it resets
+- ChromaDB vectors are stored in-container on Render's free tier; the startup re-embed hook handles redeployments, but a persistent volume would be cleaner in production
+- Groq's free tier has a daily token limit; the agent uses Llama 3.1 8B Instant (500k tokens/day) to stay within quota for typical usage
 - Tavily free tier allows 1,000 web searches/month — sufficient for personal use and demos
 
 ---
