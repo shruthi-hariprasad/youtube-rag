@@ -83,7 +83,7 @@ def run_agent(
 
         # Step 1: always retrieve video chunks first (retriever handles hybrid BM25+cosine+RRF)
         yield f"data: {json.dumps({'type': 'tool_call', 'tool': 'search_videos', 'query': search_query})}\n\n"
-        video_chunks = retrieve_chunks(search_query, video_ids=video_ids)
+        video_chunks = retrieve_chunks(search_query, video_ids=video_ids, n_results=8)
         for c in video_chunks:
             c["title"] = title_map.get(c["video_id"], c["video_id"])
             c["source"] = "video"
@@ -153,7 +153,7 @@ def run_agent(
         # Use fuller chunk text (chunks are ~300 words; 1500 chars ≈ 250 words — better coverage)
         context = "\n\n".join(
             f"[{'Video' if c.get('source') == 'video' else 'Web'}: {c['title']}]\n{c['text'][:1500]}"
-            for c in final_chunks[:8]
+            for c in final_chunks[:10]
         )
 
         synth_messages = [{"role": "system", "content": _SYNTHESIZER_SYSTEM}]
