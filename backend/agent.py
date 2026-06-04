@@ -13,6 +13,14 @@ client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 MODEL = "llama-3.3-70b-versatile"       # synthesis
 DECISION_MODEL = "llama-3.1-8b-instant" # web decision only (separate quota)
 
+_QUERY_REWRITE_SYSTEM = """Given a conversation history and a follow-up question, rewrite the question into a single self-contained search query that includes all necessary context from the history.
+
+Rules:
+- Return ONLY the rewritten query — no explanation, no quotes, no punctuation at the end
+- If the question is already self-contained, return it unchanged
+- Keep the query concise (under 15 words)
+- Include the key subject (person, event, topic) from history if the question omits it"""
+
 _WEB_DECISION_SYSTEM = """You have been given a question and transcript excerpts from the user's video library.
 Decide whether a web search would meaningfully help answer the question.
 
@@ -51,9 +59,31 @@ def run_agent(
     _meta_by_vid = {m["video_id"]: m for m in (meta_chunks or [])}
 
     try:
+        # Step 0: if there's conversation history, rewrite the question into a
+        # self-contained search query so follow-ups like "what about boulder 4?"
+        # retrieve the right chunks instead of searching blind
+        search_query = question
+        if history and len(history) >= 2:
+            try:
+                recent = history[-4:]  # last 2 exchanges
+                history_text = "\n".join(f"{m['role'].upper()}: {m['content']}" for m in recent)
+                rw = client.chat.completions.create(
+                    model=DECISION_MODEL,
+                    messages=[
+                        {"role": "system", "content": _QUERY_REWRITE_SYSTEM},
+                        {"role": "user", "content": f"History:\n{history_text}\n\nFollow-up question: {question}"},
+                    ],
+                    max_tokens=32,
+                )
+                rewritten = rw.choices[0].message.content.strip().strip('"').strip("'")
+                if rewritten:
+                    search_query = rewritten
+            except Exception:
+                logger.exception("Query rewrite failed, using original question")
+
         # Step 1: always retrieve video chunks first (retriever handles hybrid BM25+cosine+RRF)
-        yield f"data: {json.dumps({'type': 'tool_call', 'tool': 'search_videos', 'query': question})}\n\n"
-        video_chunks = retrieve_chunks(question, video_ids=video_ids)
+        yield f"data: {json.dumps({'type': 'tool_call', 'tool': 'search_videos', 'query': search_query})}\n\n"
+        video_chunks = retrieve_chunks(search_query, video_ids=video_ids)
         for c in video_chunks:
             c["title"] = title_map.get(c["video_id"], c["video_id"])
             c["source"] = "video"
@@ -71,7 +101,7 @@ def run_agent(
                 model=DECISION_MODEL,
                 messages=[
                     {"role": "system", "content": _WEB_DECISION_SYSTEM},
-                    {"role": "user", "content": f"Question: {question}\n\nVideo excerpts:\n{video_summary}"},
+                    {"role": "user", "content": f"Question: {search_query}\n\nVideo excerpts:\n{video_summary}"},
                 ],
                 max_tokens=64,
             )
