@@ -42,6 +42,8 @@ class QueryRequest(BaseModel):
     history: list[dict] | None = None
 
 
+
+
 security_scheme = HTTPBearer()
 
 
@@ -350,7 +352,8 @@ def query_agent(req: QueryRequest, db: Session = Depends(get_db), user_id: int =
         {
             "video_id": v.youtube_video_id,
             "title": title_map[v.youtube_video_id],
-            "text": f"Video title: {v.title}\nChannel: {v.channel_name or 'unknown'}\nURL: {v.url}",
+            "text": f"Video title: {v.title}\nChannel: {v.channel_name or 'unknown'}\nURL: {v.url}"
+                    + (f"\nSummary: {v.summary}" if v.summary else ""),
             "source": "video",
             "chunk_index": -1,
             "start_time": 0.0,

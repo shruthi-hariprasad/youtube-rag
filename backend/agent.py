@@ -42,9 +42,15 @@ def run_agent(question: str, video_ids: list[str], title_map: dict[str, str], me
     _meta = list(meta_chunks or [])
 
     try:
+        # For generic summary/overview questions, search using the video title
+        # so retrieval finds topically relevant chunks instead of nothing
+        _is_summary_q = any(w in question.lower() for w in ["summary", "summarize", "overview", "about", "what is this video", "what's this video"])
+        titles_str = " ".join(title_map.values())
+        search_query = titles_str if _is_summary_q and titles_str else question
+
         # Step 1: always search videos first
-        yield f"data: {json.dumps({'type': 'tool_call', 'tool': 'search_videos', 'query': question})}\n\n"
-        video_chunks = retrieve_chunks(question, video_ids=video_ids)
+        yield f"data: {json.dumps({'type': 'tool_call', 'tool': 'search_videos', 'query': search_query})}\n\n"
+        video_chunks = retrieve_chunks(search_query, video_ids=video_ids)
         for c in video_chunks:
             c["title"] = title_map.get(c["video_id"], c["video_id"])
             c["source"] = "video"
