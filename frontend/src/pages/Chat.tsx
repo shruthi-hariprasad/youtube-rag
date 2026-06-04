@@ -360,7 +360,7 @@ export default function Chat() {
 
                       {expandedSources.has(i) && (
                         <div className="mt-1.5 flex flex-col gap-2">
-                          {msg.sources.slice(0, 4).map((src, j) => (
+                          {msg.sources.map((src, j) => (
                             <div key={j} className="flex gap-2 text-xs text-gray-500">
                               <span className={`shrink-0 mt-0.5 ${src.source === "web" ? "text-emerald-500" : "text-indigo-400"}`}>
                                 {src.source === "web" ? "⌕" : "▶"}

@@ -140,17 +140,31 @@ def run_agent(
             if token:
                 yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
 
-        # One source per video (first/highest-ranked chunk), one per web URL.
-        # Only show if relevance is meaningful (>= 0.5).
-        seen_source: set[str] = set()
+        # Up to 3 chunks per video (sorted by timestamp so the UI shows them in order),
+        # one entry per web URL. Only include if relevance is meaningful (>= 0.5).
+        video_source_counts: dict[str, int] = {}
+        web_seen: set[str] = set()
         display_sources = []
         for c in unique_chunks:
             if c.get("_relevance", 0) < 0.5:
                 continue
-            key = c.get("video_id") or c.get("url", "")
-            if key and key not in seen_source:
-                seen_source.add(key)
-                display_sources.append(c)
+            if c.get("source") == "web":
+                url = c.get("url", "")
+                if url and url not in web_seen:
+                    web_seen.add(url)
+                    display_sources.append(c)
+            else:
+                vid = c.get("video_id", "")
+                if vid and video_source_counts.get(vid, 0) < 3:
+                    video_source_counts[vid] = video_source_counts.get(vid, 0) + 1
+                    display_sources.append(c)
+
+        # Sort video sources by timestamp so they appear in chronological order
+        display_sources.sort(key=lambda c: (
+            c.get("source") == "web",       # video sources first
+            c.get("video_id", ""),           # group by video
+            c.get("start_time") or 0.0,      # then chronological
+        ))
         yield f"data: {json.dumps({'type': 'done', 'sources': display_sources})}\n\n"
 
     except Exception as e:
