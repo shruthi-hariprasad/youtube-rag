@@ -37,14 +37,19 @@ def _err(msg: str):
     return f"data: {json.dumps({'type': 'token', 'token': msg})}\n\n"
 
 
-def run_agent(question: str, video_ids: list[str], title_map: dict[str, str], meta_chunks: list[dict] | None = None):
+def run_agent(question: str, video_ids: list[str], title_map: dict[str, str], meta_chunks: list[dict] | None = None, history: list[dict] | None = None):
     """Generator yielding SSE-formatted strings for the agent reasoning trace and answer."""
     _meta = list(meta_chunks or [])
 
     try:
         # For generic summary/overview questions, search using the video title
         # so retrieval finds topically relevant chunks instead of nothing
-        _is_summary_q = any(w in question.lower() for w in ["summary", "summarize", "overview", "about", "what is this video", "what's this video"])
+        _q = question.lower().strip()
+        _is_summary_q = any(_q == w or _q.startswith(w) for w in [
+            "what is the summary", "summarize", "give me a summary",
+            "what is this video about", "what's this video about",
+            "what is the video about", "overview of the video",
+        ])
         titles_str = " ".join(title_map.values())
         search_query = titles_str if _is_summary_q and titles_str else question
 
@@ -122,8 +127,10 @@ def run_agent(question: str, video_ids: list[str], title_map: dict[str, str], me
             for c in final_chunks[:6]
         )
 
-        synth_messages = [
-            {"role": "system", "content": _SYNTHESIZER_SYSTEM},
+        synth_messages = [{"role": "system", "content": _SYNTHESIZER_SYSTEM}]
+        if history:
+            synth_messages.extend(history[-4:])
+        synth_messages.append(
             {"role": "user", "content": f"Sources:\n{context}\n\nQuestion: {question}"},
         ]
 

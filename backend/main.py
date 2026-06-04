@@ -366,7 +366,7 @@ def query_agent(req: QueryRequest, db: Session = Depends(get_db), user_id: int =
         raise HTTPException(status_code=404, detail="No videos in your library yet")
 
     return StreamingResponse(
-        run_agent(req.question, filter_ids, title_map, meta_chunks),
+        run_agent(req.question, filter_ids, title_map, meta_chunks, history=req.history),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

@@ -168,6 +168,7 @@ export default function Chat() {
       body: JSON.stringify({
         question,
         video_id: video?.youtube_video_id ?? null,
+        history: messages.slice(-4).map(m => ({ role: m.role, content: m.content })),
       }),
     })
 
