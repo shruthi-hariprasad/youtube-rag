@@ -12,8 +12,8 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-MODEL = "llama-3.1-8b-instant"       # 500k TPD free quota — used for all agent calls
-DECISION_MODEL = "llama-3.1-8b-instant"
+MODEL = "llama-3.3-70b-versatile"    # used for synthesis
+DECISION_MODEL = "llama-3.1-8b-instant"  # used for web decision only (separate quota)
 
 _WEB_DECISION_SYSTEM = """You have been given a question and transcript excerpts retrieved from the user's video library.
 Decide whether web search is needed to give a complete answer.
