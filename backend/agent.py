@@ -13,15 +13,20 @@ client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 MODEL = "llama-3.3-70b-versatile"       # synthesis
 DECISION_MODEL = "llama-3.1-8b-instant" # web decision only (separate quota)
 
-_WEB_DECISION_SYSTEM = """You have been given a question and transcript excerpts retrieved from the user's video library.
-Decide whether web search is needed to give a complete answer.
+_WEB_DECISION_SYSTEM = """You have been given a question and transcript excerpts from the user's video library.
+Decide whether a web search would meaningfully help answer the question.
 
-Reply with valid JSON only, one of:
+Reply with valid JSON only — no other text:
   {"web_needed": false}
   {"web_needed": true, "query": "<concise web search query>"}
 
-Use web_needed=true only if the video excerpts clearly cannot answer the question.
-If the excerpts contain a reasonable answer, use web_needed=false."""
+Use web_needed=true when ANY of these apply:
+- The question asks about facts, events, or entities not present in the excerpts
+- The question asks about things outside the scope of the video (e.g. other events, other people, external context)
+- The excerpts only partially answer the question and external facts would help complete it
+- The question is clearly about current events, rankings, schedules, or results
+
+Use web_needed=false only when the excerpts already contain a complete answer to the question."""
 
 _SYNTHESIZER_SYSTEM = """You are a helpful assistant. Answer strictly based on the provided sources.
 - Do NOT include inline citations, source labels, or a title/heading at the start
