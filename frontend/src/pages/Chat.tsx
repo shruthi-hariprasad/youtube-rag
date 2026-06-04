@@ -87,9 +87,27 @@ function ReasoningTrace({ trace }: { trace: TraceStep[] }) {
 export default function Chat() {
   const { state } = useLocation()
   const navigate = useNavigate()
-  const video: Video | null = state?.video ?? null
 
-  const [messages, setMessages] = useState<Message[]>([])
+  // Persist video in localStorage so it survives refresh
+  const videoFromState: Video | null = state?.video ?? null
+  const storageKey = videoFromState
+    ? `chat_video_${videoFromState.youtube_video_id}`
+    : "chat_video_library"
+  const messagesKey = videoFromState
+    ? `chat_messages_${videoFromState.youtube_video_id}`
+    : "chat_messages_library"
+
+  if (videoFromState) {
+    localStorage.setItem(storageKey, JSON.stringify(videoFromState))
+  }
+
+  const video: Video | null = videoFromState ?? (() => {
+    try { return JSON.parse(localStorage.getItem(storageKey) || "null") } catch { return null }
+  })()
+
+  const [messages, setMessages] = useState<Message[]>(() => {
+    try { return JSON.parse(localStorage.getItem(messagesKey) || "[]") } catch { return [] }
+  })
   const [input, setInput] = useState("")
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState("")
@@ -97,6 +115,11 @@ export default function Chat() {
   const bottomRef = useRef<HTMLDivElement>(null)
 
   const suggestedQuestions = parseQuestions(video?.suggested_questions)
+
+  // Persist messages on every change
+  useEffect(() => {
+    localStorage.setItem(messagesKey, JSON.stringify(messages))
+  }, [messages, messagesKey])
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" })
@@ -222,7 +245,7 @@ export default function Chat() {
       {/* Sub-header */}
       <div className="bg-white border-b border-gray-100 px-6 py-3 flex items-center gap-4">
         <button
-          onClick={() => navigate("/library")}
+          onClick={() => { localStorage.removeItem(messagesKey); navigate("/library") }}
           className="flex items-center gap-1.5 text-sm text-gray-400 hover:text-gray-700 transition"
         >
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-4 h-4">
