@@ -97,9 +97,12 @@ export default function Chat() {
     ? `chat_messages_${videoFromState.youtube_video_id}`
     : "chat_messages_library"
 
-  if (videoFromState) {
-    localStorage.setItem(storageKey, JSON.stringify(videoFromState))
-  }
+  // Write only when videoFromState actually changes, not on every render
+  useEffect(() => {
+    if (videoFromState) {
+      localStorage.setItem(storageKey, JSON.stringify(videoFromState))
+    }
+  }, [videoFromState?.youtube_video_id]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const video: Video | null = videoFromState ?? (() => {
     try { return JSON.parse(localStorage.getItem(storageKey) || "null") } catch { return null }
@@ -113,6 +116,7 @@ export default function Chat() {
   const [error, setError] = useState("")
   const [expandedSources, setExpandedSources] = useState<Set<number>>(new Set())
   const bottomRef = useRef<HTMLDivElement>(null)
+  const abortRef = useRef<AbortController | null>(null)
 
   const suggestedQuestions = parseQuestions(video?.suggested_questions)
 
@@ -140,7 +144,16 @@ export default function Chat() {
     submitQuestion(input)
   }
 
+  // Abort in-flight request when component unmounts
+  useEffect(() => {
+    return () => { abortRef.current?.abort() }
+  }, [])
+
   async function submitQuestion(question: string) {
+    // Cancel any previous in-flight request
+    abortRef.current?.abort()
+    abortRef.current = new AbortController()
+
     setMessages(prev => [...prev, { role: "user", content: question }])
     setInput("")
     setLoading(true)
@@ -149,8 +162,9 @@ export default function Chat() {
 
     try {
       const token = localStorage.getItem("token")
-      await streamAgent(question, token)
+      await streamAgent(question, token, abortRef.current.signal)
     } catch (err: any) {
+      if (err.name === "AbortError") return // user navigated away — silently drop
       setMessages(prev => prev.slice(0, -1))
       setError(err.message || "Something went wrong")
     } finally {
@@ -158,7 +172,10 @@ export default function Chat() {
     }
   }
 
-  async function streamAgent(question: string, token: string | null) {
+  async function streamAgent(question: string, token: string | null, signal: AbortSignal) {
+    // Capture history before the new assistant placeholder was added
+    const historySnapshot = messages.slice(-6).map(m => ({ role: m.role, content: m.content }))
+
     const response = await fetch(`${BASE_URL}/query/agent`, {
       method: "POST",
       headers: {
@@ -168,20 +185,20 @@ export default function Chat() {
       body: JSON.stringify({
         question,
         video_id: video?.youtube_video_id ?? null,
-        history: messages.slice(-4).map(m => ({ role: m.role, content: m.content })),
+        history: historySnapshot,
       }),
+      signal,
     })
 
     if (!response.ok) {
-      const err = await response.json()
-      throw new Error(err.detail || "Request failed")
+      let detail = "Request failed"
+      try { detail = (await response.json()).detail ?? detail } catch { /* ignore */ }
+      throw new Error(detail)
     }
 
     const reader = response.body!.getReader()
     const decoder = new TextDecoder()
     let buffer = ""
-    // track pending tool call to pair with its result
-    let pendingTool: { tool: string; query: string } | null = null
 
     while (true) {
       const { done, value } = await reader.read()
@@ -192,10 +209,10 @@ export default function Chat() {
 
       for (const line of lines) {
         if (!line.startsWith("data: ")) continue
-        const data = JSON.parse(line.slice(6))
+        let data: any
+        try { data = JSON.parse(line.slice(6)) } catch { continue }
 
         if (data.type === "tool_call") {
-          pendingTool = { tool: data.tool, query: data.query }
           setMessages(prev => {
             const updated = [...prev]
             const last = { ...updated[updated.length - 1] }
@@ -204,12 +221,10 @@ export default function Chat() {
             return updated
           })
         } else if (data.type === "tool_result") {
-          pendingTool = null
           setMessages(prev => {
             const updated = [...prev]
             const last = { ...updated[updated.length - 1] }
             const trace = [...(last.trace ?? [])]
-            // update the last trace step with the count
             if (trace.length > 0) {
               trace[trace.length - 1] = { ...trace[trace.length - 1], count: data.count }
             }
@@ -234,9 +249,6 @@ export default function Chat() {
         }
       }
     }
-
-    // suppress unused warning
-    void pendingTool
   }
 
   return (

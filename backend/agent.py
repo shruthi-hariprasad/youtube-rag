@@ -1,19 +1,17 @@
 import json
 import logging
 import os
-import numpy as np
 from groq import Groq
 from dotenv import load_dotenv
 from .retriever import retrieve_chunks
-from .embedder import get_embeddings
 from .web_search import search_web as _search_web
 
 load_dotenv()
 logger = logging.getLogger(__name__)
 
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-MODEL = "llama-3.3-70b-versatile"    # used for synthesis
-DECISION_MODEL = "llama-3.1-8b-instant"  # used for web decision only (separate quota)
+MODEL = "llama-3.3-70b-versatile"       # synthesis
+DECISION_MODEL = "llama-3.1-8b-instant" # web decision only (separate quota)
 
 _WEB_DECISION_SYSTEM = """You have been given a question and transcript excerpts retrieved from the user's video library.
 Decide whether web search is needed to give a complete answer.
@@ -37,33 +35,30 @@ def _err(msg: str):
     return f"data: {json.dumps({'type': 'token', 'token': msg})}\n\n"
 
 
-def run_agent(question: str, video_ids: list[str], title_map: dict[str, str], meta_chunks: list[dict] | None = None, history: list[dict] | None = None):
+def run_agent(
+    question: str,
+    video_ids: list[str],
+    title_map: dict[str, str],
+    meta_chunks: list[dict] | None = None,
+    history: list[dict] | None = None,
+):
     """Generator yielding SSE-formatted strings for the agent reasoning trace and answer."""
-    _meta = list(meta_chunks or [])
+    _meta_by_vid = {m["video_id"]: m for m in (meta_chunks or [])}
 
     try:
-        # For generic summary/overview questions, search using the video title
-        # so retrieval finds topically relevant chunks instead of nothing
-        _q = question.lower().strip()
-        _is_summary_q = any(_q == w or _q.startswith(w) for w in [
-            "what is the summary", "summarize", "give me a summary",
-            "what is this video about", "what's this video about",
-            "what is the video about", "overview of the video",
-        ])
-        titles_str = " ".join(title_map.values())
-        search_query = titles_str if _is_summary_q and titles_str else question
-
-        # Step 1: always search videos first
-        yield f"data: {json.dumps({'type': 'tool_call', 'tool': 'search_videos', 'query': search_query})}\n\n"
-        video_chunks = retrieve_chunks(search_query, video_ids=video_ids)
+        # Step 1: always retrieve video chunks first (retriever handles hybrid BM25+cosine+RRF)
+        yield f"data: {json.dumps({'type': 'tool_call', 'tool': 'search_videos', 'query': question})}\n\n"
+        video_chunks = retrieve_chunks(question, video_ids=video_ids)
         for c in video_chunks:
             c["title"] = title_map.get(c["video_id"], c["video_id"])
             c["source"] = "video"
         yield f"data: {json.dumps({'type': 'tool_result', 'tool': 'search_videos', 'count': len(video_chunks)})}\n\n"
 
-        # Step 2: one LLM call to decide if web search is needed
-        # Keep decision prompt small — just top 2 transcript chunks, no meta
-        transcript_summary = "\n\n".join(f"[{c['title']}]\n{c['text'][:300]}" for c in video_chunks[:2])
+        # Step 2: one cheap LLM call to decide if web search adds value
+        # Show all retrieved chunks (up to 5) so the model has full context to decide
+        transcript_summary = "\n\n".join(
+            f"[{c['title']}]\n{c['text'][:500]}" for c in video_chunks[:5]
+        )
         video_summary = transcript_summary.strip() or "(no results)"
 
         try:
@@ -102,29 +97,28 @@ def run_agent(question: str, video_ids: list[str], title_map: dict[str, str], me
                 seen.add(key)
                 unique_chunks.append(c)
 
-        # Re-rank transcript/web chunks against the original question
-        if unique_chunks:
-            texts = [c.get("text", "") for c in unique_chunks]
-            all_embs = np.array(get_embeddings([question] + texts))
-            q_emb = all_embs[0]
-            chunk_embs = all_embs[1:]
-            q_norm = np.linalg.norm(q_emb)
-            for c, c_emb in zip(unique_chunks, chunk_embs):
-                norm = q_norm * np.linalg.norm(c_emb)
-                c["_relevance"] = float(np.dot(q_emb, c_emb) / norm) if norm > 0 else 0.0
-            unique_chunks.sort(key=lambda c: c["_relevance"], reverse=True)
+        # Retriever already ranks by hybrid BM25+cosine — trust that order.
+        # Assign a synthetic relevance score based on retrieval rank for source filtering later.
+        for rank, c in enumerate(unique_chunks):
+            if "_relevance" not in c:
+                # Linear decay: rank 0 → 1.0, rank 4 → 0.6, beyond that → below threshold
+                c["_relevance"] = max(0.0, 1.0 - rank * 0.08)
 
-        # Meta chunks always first — hold library-level facts transcript search can't surface
-        final_chunks = _meta + unique_chunks
+        # Pin meta chunks only for videos that actually appear in retrieved content.
+        # This prevents meta chunks from consuming all context slots on library queries.
+        retrieved_video_ids = {c.get("video_id") for c in unique_chunks}
+        relevant_meta = [_meta_by_vid[vid] for vid in retrieved_video_ids if vid in _meta_by_vid]
+        final_chunks = relevant_meta + unique_chunks
 
         if not final_chunks:
             yield _err("I could not find relevant information to answer your question.")
             yield f"data: {json.dumps({'type': 'done', 'sources': []})}\n\n"
             return
 
+        # Use fuller chunk text (chunks are ~300 words; 1500 chars ≈ 250 words — better coverage)
         context = "\n\n".join(
-            f"[{'Video' if c.get('source') == 'video' else 'Web'}: {c['title']}]\n{c['text'][:400]}"
-            for c in final_chunks[:6]
+            f"[{'Video' if c.get('source') == 'video' else 'Web'}: {c['title']}]\n{c['text'][:1500]}"
+            for c in final_chunks[:8]
         )
 
         synth_messages = [{"role": "system", "content": _SYNTHESIZER_SYSTEM}]
@@ -146,8 +140,8 @@ def run_agent(question: str, video_ids: list[str], title_map: dict[str, str], me
             if token:
                 yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
 
-        # One source per video (highest relevance), one per web URL
-        # Only include if relevance is meaningful (>= 0.5)
+        # One source per video (first/highest-ranked chunk), one per web URL.
+        # Only show if relevance is meaningful (>= 0.5).
         seen_source: set[str] = set()
         display_sources = []
         for c in unique_chunks:

@@ -70,7 +70,20 @@ def stream_answer(query: str, chunks: list[dict], history: list[dict] | None = N
 
 
 def generate_summary_and_questions(transcript_text: str) -> dict:
-    excerpt = transcript_text[:6000]
+    # Sample beginning, middle, and end so long videos aren't summarised from intro only
+    length = len(transcript_text)
+    if length <= 6000:
+        excerpt = transcript_text
+    else:
+        chunk = 2000
+        mid = length // 2
+        excerpt = (
+            transcript_text[:chunk]
+            + "\n...\n"
+            + transcript_text[mid - chunk // 2 : mid + chunk // 2]
+            + "\n...\n"
+            + transcript_text[-chunk:]
+        )
     response = client.chat.completions.create(
         model=MODEL,
         max_tokens=512,
