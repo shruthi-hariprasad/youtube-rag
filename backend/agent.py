@@ -132,7 +132,7 @@ def run_agent(question: str, video_ids: list[str], title_map: dict[str, str], me
             synth_messages.extend(history[-4:])
         synth_messages.append(
             {"role": "user", "content": f"Sources:\n{context}\n\nQuestion: {question}"},
-        ]
+        )
 
         stream = client.chat.completions.create(
             model=MODEL,
