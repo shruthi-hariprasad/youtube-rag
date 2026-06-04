@@ -379,7 +379,7 @@ export default function Chat() {
                                     {video ? formatTime(src.start_time ?? 0) : `${src.title} · ${formatTime(src.start_time ?? 0)}`}
                                   </a>
                                 )}
-                                <p className="text-gray-400 line-clamp-1 mt-0.5">{src.text}</p>
+                                <p className="text-gray-400 line-clamp-2 mt-0.5">{src.text}</p>
                               </div>
                             </div>
                           ))}

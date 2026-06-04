@@ -164,12 +164,8 @@ def run_agent(
                     video_source_counts[vid] = video_source_counts.get(vid, 0) + 1
                     display_sources.append(c)
 
-        # Sort video sources by timestamp so they appear in chronological order
-        display_sources.sort(key=lambda c: (
-            c.get("source") == "web",       # video sources first
-            c.get("video_id", ""),           # group by video
-            c.get("start_time") or 0.0,      # then chronological
-        ))
+        # Keep retrieval rank order — most semantically relevant chunk first.
+        # The excerpt shown next to each timestamp lets the user pick the right one.
         yield f"data: {json.dumps({'type': 'done', 'sources': display_sources})}\n\n"
 
     except Exception as e:
