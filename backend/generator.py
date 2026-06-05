@@ -107,4 +107,20 @@ def generate_summary_and_questions(transcript_text: str) -> dict:
     if content.startswith("```"):
         parts = content.split("```")
         content = parts[1].lstrip("json").strip() if len(parts) > 1 else content
-    return json.loads(content)
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError:
+        # LLM occasionally emits slightly malformed JSON — retry once with stricter prompt
+        retry = client.chat.completions.create(
+            model=MODEL,
+            max_tokens=512,
+            messages=[
+                {"role": "system", "content": "Respond with valid JSON only. No markdown, no trailing commas, no comments."},
+                {"role": "user", "content": f"Fix this invalid JSON and return only the corrected JSON:\n{content}"},
+            ],
+        )
+        fixed = retry.choices[0].message.content.strip()
+        if fixed.startswith("```"):
+            parts = fixed.split("```")
+            fixed = parts[1].lstrip("json").strip() if len(parts) > 1 else fixed
+        return json.loads(fixed)
