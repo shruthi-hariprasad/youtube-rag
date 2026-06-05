@@ -1,17 +1,33 @@
 import json
 import logging
 import os
+from typing import Annotated
+import operator
+
 from groq import Groq
 from dotenv import load_dotenv
+from langgraph.graph import StateGraph, END
+from typing_extensions import TypedDict
+
 from .retriever import retrieve_chunks
 from .web_search import search_web as _search_web
 
 load_dotenv()
 logger = logging.getLogger(__name__)
 
+# LangSmith tracing — auto-instruments the LangGraph state graph when enabled.
+# Set LANGCHAIN_TRACING_V2=true and LANGCHAIN_API_KEY in .env to activate.
+if os.getenv("LANGCHAIN_TRACING_V2", "false").lower() == "true":
+    try:
+        import langsmith  # noqa: F401 — import activates the tracing client
+        os.environ.setdefault("LANGCHAIN_PROJECT", os.getenv("LANGCHAIN_PROJECT", "youtube-rag"))
+        logger.info("LangSmith tracing enabled (project: %s)", os.getenv("LANGCHAIN_PROJECT"))
+    except ImportError:
+        logger.warning("LANGCHAIN_TRACING_V2=true but langsmith is not installed — pip install langsmith")
+
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-MODEL = "llama-3.3-70b-versatile"       # synthesis
-DECISION_MODEL = "llama-3.1-8b-instant" # web decision only (separate quota)
+MODEL = "llama-3.3-70b-versatile"
+DECISION_MODEL = "llama-3.1-8b-instant"
 
 _QUERY_REWRITE_SYSTEM = """Given a conversation history and a follow-up question, rewrite the question into a single self-contained search query that includes all necessary context from the history.
 
@@ -44,7 +60,191 @@ _SYNTHESIZER_SYSTEM = """You are a helpful assistant. Answer strictly based on t
 - If the sources do not contain enough information to answer, say so honestly"""
 
 
-def _err(msg: str):
+# ---------------------------------------------------------------------------
+# State
+# ---------------------------------------------------------------------------
+
+class PipelineState(TypedDict):
+    # inputs
+    question: str
+    video_ids: list[str]
+    title_map: dict[str, str]
+    meta_chunks: list[dict]
+    history: list[dict]
+    # intermediate
+    search_query: str
+    video_chunks: list[dict]
+    web_needed: bool
+    web_query: str
+    web_chunks: list[dict]
+    unique_chunks: list[dict]
+    final_chunks: list[dict]
+    # SSE events emitted by each node — accumulated with list concatenation
+    events: Annotated[list[str], operator.add]
+
+
+# ---------------------------------------------------------------------------
+# Nodes
+# ---------------------------------------------------------------------------
+
+def query_rewrite_node(state: PipelineState) -> dict:
+    question = state["question"]
+    history = state.get("history") or []
+    search_query = question
+
+    if len(history) >= 2:
+        try:
+            recent = history[-4:]
+            history_text = "\n".join(f"{m['role'].upper()}: {m['content']}" for m in recent)
+            rw = client.chat.completions.create(
+                model=DECISION_MODEL,
+                messages=[
+                    {"role": "system", "content": _QUERY_REWRITE_SYSTEM},
+                    {"role": "user", "content": f"History:\n{history_text}\n\nFollow-up question: {question}"},
+                ],
+                max_tokens=32,
+            )
+            rewritten = rw.choices[0].message.content.strip().strip('"').strip("'")
+            if rewritten:
+                search_query = rewritten
+        except Exception:
+            logger.exception("Query rewrite failed, using original question")
+
+    return {"search_query": search_query}
+
+
+def retrieve_node(state: PipelineState) -> dict:
+    search_query = state["search_query"]
+    video_ids = state["video_ids"]
+    title_map = state["title_map"]
+
+    events = [f"data: {json.dumps({'type': 'tool_call', 'tool': 'search_videos', 'query': search_query})}\n\n"]
+
+    video_chunks = retrieve_chunks(search_query, video_ids=video_ids, n_results=8)
+    for c in video_chunks:
+        c["title"] = title_map.get(c["video_id"], c["video_id"])
+        c["source"] = "video"
+
+    events.append(f"data: {json.dumps({'type': 'tool_result', 'tool': 'search_videos', 'count': len(video_chunks)})}\n\n")
+
+    return {"video_chunks": video_chunks, "events": events}
+
+
+def web_decision_node(state: PipelineState) -> dict:
+    search_query = state["search_query"]
+    video_chunks = state["video_chunks"]
+
+    transcript_summary = "\n\n".join(
+        f"[{c['title']}]\n{c['text'][:500]}" for c in video_chunks[:5]
+    )
+    video_summary = transcript_summary.strip() or "(no results)"
+
+    try:
+        resp = client.chat.completions.create(
+            model=DECISION_MODEL,
+            messages=[
+                {"role": "system", "content": _WEB_DECISION_SYSTEM},
+                {"role": "user", "content": f"Question: {search_query}\n\nVideo excerpts:\n{video_summary}"},
+            ],
+            max_tokens=64,
+        )
+        raw = resp.choices[0].message.content.strip()
+        if raw.startswith("```"):
+            raw = raw.split("```")[1].lstrip("json").strip()
+        decision = json.loads(raw)
+    except Exception:
+        logger.exception("Web decision call failed, skipping web search")
+        decision = {"web_needed": False}
+
+    return {
+        "web_needed": bool(decision.get("web_needed")),
+        "web_query": decision.get("query", ""),
+    }
+
+
+def web_search_node(state: PipelineState) -> dict:
+    web_query = state["web_query"]
+    events = [f"data: {json.dumps({'type': 'tool_call', 'tool': 'search_web', 'query': web_query})}\n\n"]
+
+    web_chunks = _search_web(web_query)
+
+    events.append(f"data: {json.dumps({'type': 'tool_result', 'tool': 'search_web', 'count': len(web_chunks)})}\n\n")
+
+    return {"web_chunks": web_chunks, "events": events}
+
+
+def merge_chunks_node(state: PipelineState) -> dict:
+    """Deduplicate + rank chunks and pin relevant meta chunks."""
+    video_chunks = state["video_chunks"]
+    web_chunks = state.get("web_chunks") or []
+    meta_chunks = state.get("meta_chunks") or []
+    meta_by_vid = {m["video_id"]: m for m in meta_chunks}
+
+    all_chunks = list(video_chunks) + list(web_chunks)
+
+    seen: set[str] = set()
+    unique_chunks: list[dict] = []
+    for c in all_chunks:
+        key = f"{c.get('video_id', '')}:{c.get('chunk_index', c.get('url', c.get('text', '')[:60]))}"
+        if key not in seen:
+            seen.add(key)
+            unique_chunks.append(c)
+
+    for rank, c in enumerate(unique_chunks):
+        if "_relevance" not in c:
+            c["_relevance"] = max(0.0, 1.0 - rank * 0.08)
+
+    retrieved_video_ids = {c.get("video_id") for c in unique_chunks}
+    relevant_meta = [meta_by_vid[vid] for vid in retrieved_video_ids if vid in meta_by_vid]
+    final_chunks = relevant_meta + unique_chunks
+
+    return {"unique_chunks": unique_chunks, "final_chunks": final_chunks}
+
+
+# ---------------------------------------------------------------------------
+# Routing
+# ---------------------------------------------------------------------------
+
+def _route_web(state: PipelineState) -> str:
+    if state.get("web_needed") and state.get("web_query"):
+        return "web_search"
+    return "merge_chunks"
+
+
+# ---------------------------------------------------------------------------
+# Graph
+# ---------------------------------------------------------------------------
+
+def _build_graph() -> StateGraph:
+    g = StateGraph(PipelineState)
+
+    g.add_node("query_rewrite", query_rewrite_node)
+    g.add_node("retrieve", retrieve_node)
+    g.add_node("web_decision", web_decision_node)
+    g.add_node("web_search", web_search_node)
+    g.add_node("merge_chunks", merge_chunks_node)
+
+    g.set_entry_point("query_rewrite")
+    g.add_edge("query_rewrite", "retrieve")
+    g.add_edge("retrieve", "web_decision")
+    g.add_conditional_edges("web_decision", _route_web, {
+        "web_search": "web_search",
+        "merge_chunks": "merge_chunks",
+    })
+    g.add_edge("web_search", "merge_chunks")
+    g.add_edge("merge_chunks", END)
+
+    return g.compile()
+
+
+_graph = _build_graph()
+
+
+# ---------------------------------------------------------------------------
+# Public interface — preserves the SSE generator contract for FastAPI
+# ---------------------------------------------------------------------------
+
+def _err(msg: str) -> str:
     return f"data: {json.dumps({'type': 'token', 'token': msg})}\n\n"
 
 
@@ -55,107 +255,60 @@ def run_agent(
     meta_chunks: list[dict] | None = None,
     history: list[dict] | None = None,
 ):
-    """Generator yielding SSE-formatted strings for the agent reasoning trace and answer."""
-    _meta_by_vid = {m["video_id"]: m for m in (meta_chunks or [])}
+    """Generator yielding SSE-formatted strings for the agent reasoning trace and answer.
 
+    Internally runs a LangGraph state graph for the first four pipeline stages
+    (query_rewrite → retrieve → web_decision → merge_chunks), streaming events
+    from each node as it completes. Token streaming for synthesis is handled
+    directly to preserve true per-token latency.
+    """
     try:
-        # Step 0: if there's conversation history, rewrite the question into a
-        # self-contained search query so follow-ups like "what about boulder 4?"
-        # retrieve the right chunks instead of searching blind
-        search_query = question
-        if history and len(history) >= 2:
-            try:
-                recent = history[-4:]  # last 2 exchanges
-                history_text = "\n".join(f"{m['role'].upper()}: {m['content']}" for m in recent)
-                rw = client.chat.completions.create(
-                    model=DECISION_MODEL,
-                    messages=[
-                        {"role": "system", "content": _QUERY_REWRITE_SYSTEM},
-                        {"role": "user", "content": f"History:\n{history_text}\n\nFollow-up question: {question}"},
-                    ],
-                    max_tokens=32,
-                )
-                rewritten = rw.choices[0].message.content.strip().strip('"').strip("'")
-                if rewritten:
-                    search_query = rewritten
-            except Exception:
-                logger.exception("Query rewrite failed, using original question")
+        initial_state: PipelineState = {
+            "question": question,
+            "video_ids": video_ids,
+            "title_map": title_map,
+            "meta_chunks": meta_chunks or [],
+            "history": history or [],
+            "search_query": question,
+            "video_chunks": [],
+            "web_needed": False,
+            "web_query": "",
+            "web_chunks": [],
+            "unique_chunks": [],
+            "final_chunks": [],
+            "events": [],
+        }
 
-        # Step 1: always retrieve video chunks first (retriever handles hybrid BM25+cosine+RRF)
-        yield f"data: {json.dumps({'type': 'tool_call', 'tool': 'search_videos', 'query': search_query})}\n\n"
-        video_chunks = retrieve_chunks(search_query, video_ids=video_ids, n_results=8)
-        for c in video_chunks:
-            c["title"] = title_map.get(c["video_id"], c["video_id"])
-            c["source"] = "video"
-        yield f"data: {json.dumps({'type': 'tool_result', 'tool': 'search_videos', 'count': len(video_chunks)})}\n\n"
+        # Stream node-by-node: yield each node's SSE events as soon as the node finishes
+        final_state: PipelineState | None = None
+        for chunk in _graph.stream(initial_state, stream_mode="updates"):
+            for node_name, node_update in chunk.items():
+                for event in node_update.get("events", []):
+                    yield event
+            # Merge updates into final_state manually for the last snapshot
+            if final_state is None:
+                final_state = dict(initial_state)
+            for node_update in chunk.values():
+                final_state.update(node_update)
 
-        # Step 2: one cheap LLM call to decide if web search adds value
-        # Show all retrieved chunks (up to 5) so the model has full context to decide
-        transcript_summary = "\n\n".join(
-            f"[{c['title']}]\n{c['text'][:500]}" for c in video_chunks[:5]
-        )
-        video_summary = transcript_summary.strip() or "(no results)"
+        if final_state is None:
+            yield _err("Pipeline produced no output.")
+            yield f"data: {json.dumps({'type': 'done', 'sources': []})}\n\n"
+            return
 
-        try:
-            decision_response = client.chat.completions.create(
-                model=DECISION_MODEL,
-                messages=[
-                    {"role": "system", "content": _WEB_DECISION_SYSTEM},
-                    {"role": "user", "content": f"Question: {search_query}\n\nVideo excerpts:\n{video_summary}"},
-                ],
-                max_tokens=64,
-            )
-            raw = decision_response.choices[0].message.content.strip()
-            if raw.startswith("```"):
-                raw = raw.split("```")[1].lstrip("json").strip()
-            decision = json.loads(raw)
-        except Exception:
-            logger.exception("Web decision call failed, skipping web search")
-            decision = {"web_needed": False}
-
-        all_chunks: list[dict] = list(video_chunks)
-
-        # Step 3: optionally search the web
-        if decision.get("web_needed") and decision.get("query"):
-            web_query = decision["query"]
-            yield f"data: {json.dumps({'type': 'tool_call', 'tool': 'search_web', 'query': web_query})}\n\n"
-            web_results = _search_web(web_query)
-            all_chunks.extend(web_results)
-            yield f"data: {json.dumps({'type': 'tool_result', 'tool': 'search_web', 'count': len(web_results)})}\n\n"
-
-        # Deduplicate by chunk identity
-        seen: set[str] = set()
-        unique_chunks: list[dict] = []
-        for c in all_chunks:
-            key = f"{c.get('video_id', '')}:{c.get('chunk_index', c.get('url', c.get('text', '')[:60]))}"
-            if key not in seen:
-                seen.add(key)
-                unique_chunks.append(c)
-
-        # Retriever already ranks by hybrid BM25+cosine — trust that order.
-        # Assign a synthetic relevance score based on retrieval rank for source filtering later.
-        for rank, c in enumerate(unique_chunks):
-            if "_relevance" not in c:
-                # Linear decay: rank 0 → 1.0, rank 4 → 0.6, beyond that → below threshold
-                c["_relevance"] = max(0.0, 1.0 - rank * 0.08)
-
-        # Pin meta chunks only for videos that actually appear in retrieved content.
-        # This prevents meta chunks from consuming all context slots on library queries.
-        retrieved_video_ids = {c.get("video_id") for c in unique_chunks}
-        relevant_meta = [_meta_by_vid[vid] for vid in retrieved_video_ids if vid in _meta_by_vid]
-        final_chunks = relevant_meta + unique_chunks
+        final_chunks: list[dict] = final_state.get("final_chunks") or []
+        unique_chunks: list[dict] = final_state.get("unique_chunks") or []
 
         if not final_chunks:
             yield _err("I could not find relevant information to answer your question.")
             yield f"data: {json.dumps({'type': 'done', 'sources': []})}\n\n"
             return
 
-        # Use fuller chunk text (chunks are ~300 words; 1500 chars ≈ 250 words — better coverage)
+        # Synthesize — streaming tokens directly (bypasses graph to preserve per-token latency)
         context = "\n\n".join(
             f"[{'Video' if c.get('source') == 'video' else 'Web'}: {c['title']}]\n{c['text'][:1500]}"
             for c in final_chunks[:10]
         )
-
         synth_messages = [{"role": "system", "content": _SYNTHESIZER_SYSTEM}]
         if history:
             synth_messages.extend(history[-4:])
@@ -169,14 +322,12 @@ def run_agent(
             max_tokens=1024,
             stream=True,
         )
-
         for piece in stream:
             token = piece.choices[0].delta.content
             if token:
                 yield f"data: {json.dumps({'type': 'token', 'token': token})}\n\n"
 
-        # Up to 3 chunks per video (sorted by timestamp so the UI shows them in order),
-        # one entry per web URL. Only include if relevance is meaningful (>= 0.5).
+        # Build display sources
         video_source_counts: dict[str, int] = {}
         web_seen: set[str] = set()
         display_sources = []
@@ -194,8 +345,6 @@ def run_agent(
                     video_source_counts[vid] = video_source_counts.get(vid, 0) + 1
                     display_sources.append(c)
 
-        # Keep retrieval rank order — most semantically relevant chunk first.
-        # The excerpt shown next to each timestamp lets the user pick the right one.
         yield f"data: {json.dumps({'type': 'done', 'sources': display_sources})}\n\n"
 
     except Exception as e:

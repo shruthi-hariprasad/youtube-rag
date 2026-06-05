@@ -21,6 +21,7 @@ from .generator import generate_answer, stream_answer, generate_summary_and_ques
 from .agent import run_agent
 from pydantic import BaseModel
 from .auth import hash_password, verify_password, create_token, decode_token
+from .mcp_server import router as mcp_router
 import os
 
 logger = logging.getLogger(__name__)
@@ -122,6 +123,7 @@ app.add_middleware(
 )
 
 models.Base.metadata.create_all(bind=engine)
+app.include_router(mcp_router)
 
 
 @app.post("/auth/register")
