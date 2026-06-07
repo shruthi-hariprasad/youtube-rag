@@ -1,0 +1,36 @@
+{
+  "overall": {
+    "faithfulness": 0.50625,
+    "answer_relevancy": 0.625,
+    "context_recall": 0.621875
+  },
+  "per_video": {
+    "I Bought a GIANT Box of Returned Items.. again": {
+      "faithfulness": 0.6,
+      "answer_relevancy": 0.8250000000000001,
+      "context_recall": 0.625
+    },
+    "Ep 97: Pop The Balloon Or Find Love | With Arlette Amuli": {
+      "faithfulness": 0.4125,
+      "answer_relevancy": 0.6000000000000001,
+      "context_recall": 0.525
+    },
+    "Guess Who's Asian (ft. JasonTheWeen, Tim Chantarangsu) Test Your Radar": {
+      "faithfulness": 0.375,
+      "answer_relevancy": 0.5,
+      "context_recall": 0.6125
+    },
+    "Women's Boulder final | Bern 2026": {
+      "faithfulness": 0.6375,
+      "answer_relevancy": 0.5750000000000001,
+      "context_recall": 0.7250000000000001
+    }
+  },
+  "n_samples": 32,
+  "method": "llm-as-judge (llama-3.1-8b-instant)",
+  "thresholds": {
+    "faithfulness": 0.7,
+    "answer_relevancy": 0.65,
+    "context_recall": 0.55
+  }
+}

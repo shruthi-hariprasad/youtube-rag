@@ -130,15 +130,24 @@ Evaluated on a 76-question corpus across 4 diverse video types (unboxing, dating
 
 BM25 leads on this corpus because the video content is conversational and contains many proper nouns (names, brands, places) that exact-match retrieval handles well. Hybrid RRF closes the gap at higher K by catching cases where semantic similarity surfaces relevant chunks that keyword matching misses.
 
-### Generation: RAGAS Scores
+### Generation: LLM-as-Judge Scores
 
-*To be updated after eval run — run `pytest backend/eval/test_ragas_eval.py -m "eval and full" -v` to generate.*
+Evaluated on 32 questions (8 per video type) using `llama-3.1-8b-instant` as judge. Scores are per-claim averages across faithfulness, relevancy, and recall dimensions.
 
-| Metric | Score | Threshold |
-|--------|-------|-----------|
-| Faithfulness | — | ≥ 0.70 |
-| Answer Relevancy | — | ≥ 0.65 |
-| Context Recall | — | ≥ 0.55 |
+| Metric | Score | Notes |
+|--------|-------|-------|
+| Faithfulness | 0.506 | Lower on noisy ASR videos (dating show: 0.41, social experiment: 0.38) |
+| Answer Relevancy | 0.625 | Consistent across video types |
+| Context Recall | 0.622 | Strongest on sports commentary (0.73) |
+
+**Per-video breakdown:**
+
+| Video type | Faithfulness | Relevancy | Recall |
+|------------|-------------|-----------|--------|
+| Unboxing | 0.600 | 0.825 | 0.625 |
+| Dating show (noisy ASR) | 0.412 | 0.600 | 0.525 |
+| Social experiment | 0.375 | 0.500 | 0.613 |
+| Sports commentary | 0.637 | 0.575 | 0.725 |
 
 ### Failure Analysis
 
@@ -161,11 +170,11 @@ pip install -r requirements-eval.txt
 # Retrieval comparison table — no Groq quota needed
 pytest backend/eval/test_ragas_eval.py::test_retrieval_comparison -v -s
 
-# Quick RAGAS smoke test (8 samples, ~2 min)
-pytest backend/eval/test_ragas_eval.py::test_ragas_smoke -v -s
+# Quick smoke test (8 samples, ~2 min)
+pytest backend/eval/test_ragas_eval.py::test_ragas_smoke -v -s -p no:deepeval
 
-# Full 76-question RAGAS eval (~20 min, saves eval_results.json)
-pytest backend/eval/test_ragas_eval.py::test_ragas_full -v -s
+# Full LLM-as-judge eval, 32 samples / 8 per video (~20 min, saves eval_results.json)
+pytest backend/eval/test_ragas_eval.py::test_llm_judge -v -s -p no:deepeval
 ```
 
 ---

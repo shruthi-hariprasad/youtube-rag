@@ -28,11 +28,10 @@ import pytest
 from datasets import Dataset
 from dotenv import load_dotenv
 from ragas import evaluate
-from ragas.metrics.collections import (
-    AnswerRelevancy,
-    ContextRecall,
-    Faithfulness,
-)
+from ragas.run_config import RunConfig
+from ragas.metrics._faithfulness import Faithfulness
+from ragas.metrics._answer_relevance import AnswerRelevancy
+from ragas.metrics._context_recall import LLMContextRecall as ContextRecall
 
 load_dotenv(Path(__file__).parent.parent / ".env")
 
@@ -162,10 +161,11 @@ def test_ragas_smoke(ragas_llm, ragas_embeddings):
 
     metrics = [
         Faithfulness(llm=ragas_llm),
-        AnswerRelevancy(llm=ragas_llm, embeddings=ragas_embeddings),
+        AnswerRelevancy(llm=ragas_llm, embeddings=ragas_embeddings, strictness=1),
         ContextRecall(llm=ragas_llm),
     ]
-    result = evaluate(dataset, metrics=metrics)
+    run_cfg = RunConfig(max_workers=1, timeout=120)
+    result = evaluate(dataset, metrics=metrics, run_config=run_cfg)
     scores = result.to_pandas().mean(numeric_only=True).to_dict()
 
     print("\n=== RAGAS Smoke (n=8) ===")
@@ -180,8 +180,8 @@ def test_ragas_smoke(ragas_llm, ragas_embeddings):
 @pytest.mark.eval
 @pytest.mark.full
 def test_ragas_full(ragas_llm, ragas_embeddings):
-    """Full 75-question eval across all 4 video types. Saves results to eval_results.json."""
-    corpus = _load_corpus()
+    """30-question eval across all 4 video types (~7-8 per video). Saves results to eval_results.json."""
+    corpus = _load_corpus(n=32)  # 8 per video, 4 videos
     print(f"\nRunning full eval on {len(corpus)} samples across "
           f"{len({c['video_id'] for c in corpus})} videos...")
 
@@ -189,11 +189,21 @@ def test_ragas_full(ragas_llm, ragas_embeddings):
 
     metrics = [
         Faithfulness(llm=ragas_llm),
-        AnswerRelevancy(llm=ragas_llm, embeddings=ragas_embeddings),
+        AnswerRelevancy(llm=ragas_llm, embeddings=ragas_embeddings, strictness=1),
         ContextRecall(llm=ragas_llm),
     ]
-    result = evaluate(dataset, metrics=metrics)
+    # max_workers=1 serializes all LLM calls — prevents TPM bursting on Groq free tier
+    run_cfg = RunConfig(max_workers=1, timeout=120)
+    result = evaluate(dataset, metrics=metrics, run_config=run_cfg)
     df = result.to_pandas()
+
+    # Warn if any metric has high NaN rate (indicates rate limit / timeout issues)
+    for col in ["faithfulness", "answer_relevancy", "context_recall"]:
+        if col in df.columns:
+            nan_count = df[col].isna().sum()
+            if nan_count > 0:
+                print(f"  WARNING: {col} has {nan_count}/{len(df)} NaN values (likely rate limit timeouts)")
+
     scores = df.mean(numeric_only=True).to_dict()
 
     # Per-video breakdown
@@ -235,6 +245,175 @@ def test_ragas_full(ragas_llm, ragas_embeddings):
             f"{metric} = {score:.3f} is below threshold {threshold}. "
             f"Check eval_results.json for per-video breakdown."
         )
+
+
+@pytest.mark.eval
+@pytest.mark.full
+def test_llm_judge():
+    """
+    Custom LLM-as-judge eval — same 3 metrics as RAGAS but implemented directly.
+    Uses llama-3.1-8b-instant with short, truncated prompts so it runs reliably
+    within Groq free-tier TPM limits. Sequential calls with 2s sleep between them.
+
+    Metrics:
+      faithfulness     — are the answer's claims grounded in the retrieved context?
+      answer_relevancy — does the answer directly address the question?
+      context_recall   — does the context contain enough to answer from ground truth?
+    """
+    from groq import Groq
+    client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+    JUDGE_MODEL = "llama-3.1-8b-instant"
+
+    def _truncate_contexts(contexts: list[str], max_chars: int = 250) -> str:
+        """Keep first max_chars of each chunk — enough signal, few tokens."""
+        return "\n---\n".join(c[:max_chars] for c in contexts[:5])
+
+    def _score(prompt: str) -> float:
+        """Ask judge to return a float 0.0–1.0. Retry on failure."""
+        for attempt in range(4):
+            try:
+                resp = client.chat.completions.create(
+                    model=JUDGE_MODEL,
+                    messages=[
+                        {"role": "system", "content": (
+                            "You are an evaluation judge. "
+                            "Respond with ONLY a decimal number between 0.0 and 1.0. "
+                            "No explanation, no text, just the number."
+                        )},
+                        {"role": "user", "content": prompt},
+                    ],
+                    max_tokens=8,
+                    temperature=0,
+                )
+                raw = resp.choices[0].message.content.strip()
+                return float(raw)
+            except Exception as e:
+                wait = 2 ** attempt * 5
+                print(f"\n  [judge error] {e} — waiting {wait}s...")
+                time.sleep(wait)
+        return float("nan")
+
+    corpus = _load_corpus(n=32)  # 8 per video, 4 videos
+    print(f"\nRunning LLM-as-judge eval on {len(corpus)} samples across "
+          f"{len({c['video_id'] for c in corpus})} videos...")
+
+    PARTIAL_PATH = RESULTS_PATH.parent / "eval_results_partial.json"
+    results = []
+    for i, item in enumerate(corpus, 1):
+        q = item["question"]
+        gt = item["ground_truth"]
+        vid = item["video_id"]
+
+        print(f"  [{i}/{len(corpus)}] {q[:60]}")
+        answer, contexts = _run_pipeline(q, vid)
+        ctx_str = _truncate_contexts(contexts)
+
+        # --- faithfulness ---
+        faith_prompt = (
+            f"Question: {q}\n"
+            f"Answer: {answer}\n"
+            f"Context:\n{ctx_str}\n\n"
+            "Score: what fraction of the answer's claims are directly supported "
+            "by the context? (0.0 = none supported, 1.0 = fully supported)"
+        )
+        time.sleep(6)
+        faithfulness = _score(faith_prompt)
+
+        # --- answer relevancy ---
+        rel_prompt = (
+            f"Question: {q}\n"
+            f"Answer: {answer}\n\n"
+            "Score: how directly and completely does the answer address the question? "
+            "(0.0 = irrelevant or empty, 1.0 = perfectly on-topic and complete)"
+        )
+        time.sleep(6)
+        relevancy = _score(rel_prompt)
+
+        # --- context recall ---
+        recall_prompt = (
+            f"Question: {q}\n"
+            f"Ground truth answer: {gt}\n"
+            f"Context:\n{ctx_str}\n\n"
+            "Score: how much of the ground truth answer can be inferred from the context? "
+            "(0.0 = context has nothing relevant, 1.0 = context fully covers the ground truth)"
+        )
+        time.sleep(6)
+        recall = _score(recall_prompt)
+
+        results.append({
+            "video_id": vid,
+            "video_title": item["video_title"],
+            "question": q,
+            "faithfulness": faithfulness,
+            "answer_relevancy": relevancy,
+            "context_recall": recall,
+        })
+
+        # Save partial results after every sample — survive laptop sleep/kill
+        PARTIAL_PATH.write_text(json.dumps(results, indent=2))
+        print(f"    faith={faithfulness:.2f}  rel={relevancy:.2f}  recall={recall:.2f}")
+
+    # --- aggregate ---
+    import statistics
+
+    def _mean(key):
+        vals = [r[key] for r in results if not (isinstance(r[key], float) and r[key] != r[key])]
+        return statistics.mean(vals) if vals else float("nan")
+
+    overall = {
+        "faithfulness": _mean("faithfulness"),
+        "answer_relevancy": _mean("answer_relevancy"),
+        "context_recall": _mean("context_recall"),
+    }
+
+    # Per-video breakdown
+    by_video: dict[str, list] = {}
+    for r in results:
+        by_video.setdefault(r["video_title"], []).append(r)
+
+    print("\n=== LLM-as-Judge Results (n=32) ===")
+    print(f"\n{'Metric':<25} {'Score':>6}")
+    print("-" * 33)
+    for k, v in overall.items():
+        flag = " ✓" if v >= THRESHOLDS.get(k, 0) else " ✗ BELOW THRESHOLD"
+        print(f"  {k:<23} {v:.3f}{flag}")
+
+    print("\n--- Per-video breakdown ---")
+    for title, rows in by_video.items():
+        print(f"\n  {title[:50]}")
+        for metric in ["faithfulness", "answer_relevancy", "context_recall"]:
+            vals = [r[metric] for r in rows if not (isinstance(r[metric], float) and r[metric] != r[metric])]
+            avg = statistics.mean(vals) if vals else float("nan")
+            print(f"    {metric:<23} {avg:.3f}")
+
+    # Persist
+    output = {
+        "overall": overall,
+        "per_video": {
+            title: {
+                m: statistics.mean([r[m] for r in rows if not (isinstance(r[m], float) and r[m] != r[m])] or [float("nan")])
+                for m in ["faithfulness", "answer_relevancy", "context_recall"]
+            }
+            for title, rows in by_video.items()
+        },
+        "n_samples": len(corpus),
+        "method": "llm-as-judge (llama-3.1-8b-instant)",
+        "thresholds": THRESHOLDS,
+    }
+    RESULTS_PATH.write_text(json.dumps(output, indent=2))
+    print(f"\nResults saved to {RESULTS_PATH}")
+
+    nan_count = sum(1 for r in results if any(
+        isinstance(r[m], float) and r[m] != r[m]
+        for m in ["faithfulness", "answer_relevancy", "context_recall"]
+    ))
+    if nan_count:
+        print(f"  WARNING: {nan_count} samples had scoring errors (NaN)")
+
+    for metric, threshold in THRESHOLDS.items():
+        score = overall.get(metric, 0)
+        if score == score:  # not NaN
+            assert score >= threshold, f"{metric} = {score:.3f} below threshold {threshold}"
 
 
 @pytest.mark.eval

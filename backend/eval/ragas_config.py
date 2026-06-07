@@ -38,7 +38,7 @@ def get_ragas_llm() -> LangchainLLMWrapper:
         warnings.simplefilter("ignore", DeprecationWarning)
         return LangchainLLMWrapper(
             ChatGroq(
-                model="llama-3.3-70b-versatile",
+                model="llama-3.3-70b-versatile",  # high TPM needed for RAGAS parallel jobs
                 api_key=os.getenv("GROQ_API_KEY"),
                 temperature=0,
             )
