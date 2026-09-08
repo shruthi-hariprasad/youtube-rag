@@ -7,7 +7,8 @@ load_dotenv()
 
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
-MODEL = "llama-3.1-8b-instant"  # 500k TPD free quota
+MODEL = os.getenv("GROQ_SMALL_MODEL", "openai/gpt-oss-20b")  # override on Render; see agent.py
+_LOW_REASONING = {"reasoning_effort": "low"}
 
 def _system_prompt(multi_video: bool) -> str:
     source_rule = (
@@ -86,7 +87,8 @@ def generate_summary_and_questions(transcript_text: str) -> dict:
         )
     response = client.chat.completions.create(
         model=MODEL,
-        max_tokens=512,
+        max_tokens=768,
+        extra_body=_LOW_REASONING,
         messages=[
             {
                 "role": "system",
@@ -103,7 +105,7 @@ def generate_summary_and_questions(transcript_text: str) -> dict:
             },
         ],
     )
-    content = response.choices[0].message.content.strip()
+    content = (response.choices[0].message.content or "").strip()
     if content.startswith("```"):
         parts = content.split("```")
         content = parts[1].lstrip("json").strip() if len(parts) > 1 else content
@@ -113,13 +115,14 @@ def generate_summary_and_questions(transcript_text: str) -> dict:
         # LLM occasionally emits slightly malformed JSON — retry once with stricter prompt
         retry = client.chat.completions.create(
             model=MODEL,
-            max_tokens=512,
+            max_tokens=768,
+            extra_body=_LOW_REASONING,
             messages=[
                 {"role": "system", "content": "Respond with valid JSON only. No markdown, no trailing commas, no comments."},
                 {"role": "user", "content": f"Fix this invalid JSON and return only the corrected JSON:\n{content}"},
             ],
         )
-        fixed = retry.choices[0].message.content.strip()
+        fixed = (retry.choices[0].message.content or "").strip()
         if fixed.startswith("```"):
             parts = fixed.split("```")
             fixed = parts[1].lstrip("json").strip() if len(parts) > 1 else fixed

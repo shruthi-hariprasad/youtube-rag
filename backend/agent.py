@@ -26,8 +26,14 @@ if os.getenv("LANGCHAIN_TRACING_V2", "false").lower() == "true":
         logger.warning("LANGCHAIN_TRACING_V2=true but langsmith is not installed — pip install langsmith")
 
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-MODEL = "llama-3.3-70b-versatile"
-DECISION_MODEL = "llama-3.1-8b-instant"
+# Groq model access changes over time: llama-3.3-70b / llama-3.1-8b became
+# enterprise-only in Sep 2026 (404 model_not_found on free keys). Defaults are
+# the openly priced production models; override via env on Render without a
+# code change. gpt-oss models are reasoning models, so every call pins
+# reasoning_effort=low and reasoning tokens still count toward max_tokens.
+MODEL = os.getenv("GROQ_SYNTH_MODEL", "openai/gpt-oss-120b")
+DECISION_MODEL = os.getenv("GROQ_SMALL_MODEL", "openai/gpt-oss-20b")
+_LOW_REASONING = {"reasoning_effort": "low"}
 
 _QUERY_REWRITE_SYSTEM = """Given a conversation history and a follow-up question, rewrite the question into a single self-contained search query that includes all necessary context from the history.
 
@@ -102,7 +108,8 @@ def query_rewrite_node(state: PipelineState) -> dict:
                     {"role": "system", "content": _QUERY_REWRITE_SYSTEM},
                     {"role": "user", "content": f"History:\n{history_text}\n\nFollow-up question: {question}"},
                 ],
-                max_tokens=32,
+                max_tokens=128,
+                extra_body=_LOW_REASONING,
             )
             rewritten = rw.choices[0].message.content.strip().strip('"').strip("'")
             if rewritten:
@@ -146,9 +153,10 @@ def web_decision_node(state: PipelineState) -> dict:
                 {"role": "system", "content": _WEB_DECISION_SYSTEM},
                 {"role": "user", "content": f"Question: {search_query}\n\nVideo excerpts:\n{video_summary}"},
             ],
-            max_tokens=64,
+            max_tokens=160,
+            extra_body=_LOW_REASONING,
         )
-        raw = resp.choices[0].message.content.strip()
+        raw = (resp.choices[0].message.content or "").strip()
         if raw.startswith("```"):
             raw = raw.split("```")[1].lstrip("json").strip()
         decision = json.loads(raw)
@@ -321,6 +329,7 @@ def run_agent(
             messages=synth_messages,
             max_tokens=1024,
             stream=True,
+            extra_body=_LOW_REASONING,
         )
         for piece in stream:
             token = piece.choices[0].delta.content

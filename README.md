@@ -43,7 +43,7 @@ flowchart LR
     subgraph External
         G[youtube-transcript-api]
         H[HuggingFace API\nall-MiniLM-L6-v2]
-        I[Groq API\nLlama 3.3 70B]
+        I[Groq API\nGPT-OSS 120B]
         J[Tavily Search API]
         K[LangSmith\nTracing]
     end
@@ -77,7 +77,7 @@ query_rewrite_node → retrieve_node → web_decision_node → [web_search_node 
 
 ```
 0. query_rewrite_node
-   Follow-up question + history → Llama 3.1 8B rewrites into self-contained search query
+   Follow-up question + history → small model (GPT-OSS 20B) rewrites into self-contained search query
    e.g. "what about boulder 4?" → "Colin Duffy boulder 4 performance Bern 2026"
 
 1. retrieve_node
@@ -86,7 +86,7 @@ query_rewrite_node → retrieve_node → web_decision_node → [web_search_node 
          → metadata chunk (title, channel, URL, summary) injected for each
             video that appears in results
 
-2. web_decision_node (Llama 3.1 8B — cheap, separate quota)
+2. web_decision_node (small model, GPT-OSS 20B — cheap)
    Video results → is this enough to answer the question?
                 → if yes: skip web search
                 → if no: generate focused web query
@@ -97,7 +97,7 @@ query_rewrite_node → retrieve_node → web_decision_node → [web_search_node 
 4. merge_chunks_node
    Deduplicate + rank all chunks, assign relevance scores
 
-5. Synthesize (Llama 3.3 70B — streaming, bypasses graph for per-token latency)
+5. Synthesize (GPT-OSS 120B — streaming, bypasses graph for per-token latency)
    Top-10 chunks (video + web) → streams final answer token by token
 ```
 
@@ -252,7 +252,7 @@ Returns ranked transcript chunks with `video_id`, `text`, `start_time`, and `rrf
 | Database | PostgreSQL |
 | Vector Store | ChromaDB |
 | Embeddings | HuggingFace Inference API (`all-MiniLM-L6-v2`) |
-| LLM | Groq API (Llama 3.3 70B synthesis, Llama 3.1 8B for lightweight calls) |
+| LLM | Groq API (`openai/gpt-oss-120b` synthesis, `openai/gpt-oss-20b` for lightweight calls; overridable via `GROQ_SYNTH_MODEL` / `GROQ_SMALL_MODEL`) |
 | Web Search | Tavily Search API |
 | Eval | RAGAS, DeepEval, pytest |
 | Auth | JWT + bcrypt |
@@ -286,6 +286,8 @@ Full interactive docs at `/docs`.
 | `DATABASE_URL` | Yes | PostgreSQL connection string |
 | `SECRET_KEY` | Yes | JWT signing secret |
 | `GROQ_API_KEY` | Yes | Groq API key |
+| `GROQ_SYNTH_MODEL` | No | Model for the streamed answer (default `openai/gpt-oss-120b`) |
+| `GROQ_SMALL_MODEL` | No | Model for query rewrite, web decision, summaries (default `openai/gpt-oss-20b`) |
 | `HF_TOKEN` | Yes | HuggingFace token (embeddings) |
 | `TAVILY_API_KEY` | No | Web search — skipped if not set |
 | `LANGCHAIN_TRACING_V2` | No | Set to `true` to enable LangSmith tracing |
@@ -311,7 +313,7 @@ alembic upgrade head
 - Videos without auto-generated captions cannot be transcribed
 - YouTube blocks transcript requests from cloud IPs; a residential proxy (Webshare) works around this
 - ChromaDB vectors are stored in-container on Render's free tier; the startup re-embed hook handles redeployments
-- Groq free tier: 100k tokens/day for 70B, 500k/day for 8B
+- Groq model availability changes: the Llama 3.3 70B / 3.1 8B IDs the project was built and evaluated on became enterprise-only in Sep 2026, so production now runs on GPT-OSS 120B / 20B. Eval scripts under `backend/eval/` still reference the Llama IDs and reflect the numbers measured with them.
 - Tavily free tier: 1,000 web searches/month
 
 ---
